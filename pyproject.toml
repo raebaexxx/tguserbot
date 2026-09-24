@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 authors = [{ name = "raebaexxx" }]
 dependencies = [
     "telethon==1.45.0",
+    "yt-dlp==2026.8.19",
 ]
 
 [project.optional-dependencies]

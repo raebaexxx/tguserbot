@@ -86,7 +86,8 @@ class Plugin:
 ```
 
 See [plugin development](docs/plugin-development.md) for the lifecycle and
-context API.
+context API. The optional [TikTok plugin](docs/tiktok-plugin.md) downloads a
+public video and removes its command message after sending.
 
 ## Management commands
 

@@ -7,6 +7,7 @@ The server deployment intentionally uses systemd instead of Docker.
 - Ubuntu/Debian-like systemd host
 - Python 3.12+
 - Git
+- ffmpeg (for media merging plugins)
 - Outbound access to Telegram and GitHub
 
 ## Install

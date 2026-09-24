@@ -9,3 +9,5 @@ rsa==4.9.1
     # via telethon
 telethon==1.45.0
     # via tguserbot
+yt-dlp==2026.8.19
+    # via tguserbot

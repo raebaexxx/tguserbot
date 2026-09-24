@@ -60,22 +60,28 @@ def test_manager_load_reload_disable_enable() -> None:
         manager, storage, client, dispatcher = make_manager(tmp_path)
         await storage.initialize()
         await manager.load_all_local()
-        assert manager.active_count() == 3
+        assert manager.active_count() == 4
         assert {item["name"] for item in await manager.list_plugins()} == {
             "notes",
             "status",
             "echo",
+            "tiktok",
         }
-        assert len(client.handlers) == 1
-        assert {item.name for item in dispatcher.commands()} == {"notes", "status", "echo"}
+        assert len(client.handlers) == 2
+        assert {item.name for item in dispatcher.commands()} == {
+            "notes",
+            "status",
+            "echo",
+            "tiktok",
+        }
 
         await manager.reload_local("echo")
-        assert len(client.handlers) == 1
+        assert len(client.handlers) == 2
         await manager.disable("echo")
-        assert len(client.handlers) == 0
+        assert len(client.handlers) == 1
         assert "echo" not in {item.name for item in dispatcher.commands()}
         await manager.enable("echo")
-        assert len(client.handlers) == 1
+        assert len(client.handlers) == 2
         assert "echo" in {item.name for item in dispatcher.commands()}
 
         await manager.shutdown()

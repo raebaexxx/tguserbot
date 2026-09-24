@@ -8,7 +8,7 @@ from userbot.plugin_api import Plugin
 
 
 def test_loads_all_demo_plugins() -> None:
-    for generation, name in enumerate(("notes", "status", "echo"), 1):
+    for generation, name in enumerate(("notes", "status", "echo", "tiktok"), 1):
         loaded = load_plugin(Path("plugins") / name, name, generation)
         assert loaded.manifest.name == name
         assert isinstance(loaded.instance, Plugin)
