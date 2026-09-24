@@ -136,10 +136,10 @@ class PluginContext:
     async def prepare(self, schema_version: int) -> None:
         current_version = await self.storage.migration_version(self.plugin_name)
         if schema_version > current_version:
-            await self.instance.migrate(self.storage)
+            await asyncio.wait_for(self.instance.migrate(self.storage), timeout=30.0)
             await self.storage.record_migration(self.plugin_name, schema_version)
-        await self.instance.setup(self)
-        await self.instance.start()
+        await asyncio.wait_for(self.instance.setup(self), timeout=10.0)
+        await asyncio.wait_for(self.instance.start(), timeout=10.0)
 
     def _guard(self, callback: Any) -> Any:
         async def guarded(event: Any) -> None:
@@ -198,11 +198,16 @@ class PluginContext:
             await self.tasks.cancel_all()
 
     async def shutdown(self) -> None:
-        await self.deactivate(cancel_tasks=True)
+        await self.deactivate(cancel_tasks=False)
+        stopped = await self.tasks.cancel_all(timeout_seconds=10.0)
+        if not stopped:
+            self.logger.error("plugin tasks did not stop within 10 seconds")
         try:
-            await self.instance.stop()
+            await asyncio.wait_for(self.instance.stop(), timeout=10.0)
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            self.logger.error("plugin stop hook timed out")
         except Exception:
             self.logger.exception("plugin stop hook failed")
 

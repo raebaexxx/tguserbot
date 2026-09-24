@@ -85,6 +85,9 @@ class Plugin:
         await command.respond("It works")
 ```
 
+See [plugin development](docs/plugin-development.md) for the lifecycle and
+context API.
+
 ## Management commands
 
 Management commands work in any chat but are accepted only from the configured

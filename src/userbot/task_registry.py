@@ -26,11 +26,19 @@ class TaskGroup:
         task.add_done_callback(self._tasks.discard)
         return task
 
-    async def cancel_all(self) -> None:
+    async def cancel_all(self, timeout_seconds: float = 10.0) -> bool:
         self._closed = True
         tasks = tuple(self._tasks)
         for task in tasks:
             if not task.done():
                 task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if not tasks:
+            return True
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            return False
+        return True
