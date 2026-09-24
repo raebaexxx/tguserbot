@@ -20,17 +20,17 @@ if [[ -d "${APP_DIR}/.git" ]]; then
   runuser -u "${SERVICE_USER}" -- git -C "${APP_DIR}" pull --ff-only
 else
   git clone "${REPO_URL}" "${APP_DIR}"
-  chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}"
 fi
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}"
 
 if [[ ! -x "${APP_DIR}/.venv/bin/python" ]]; then
-  python3 -m venv "${APP_DIR}/.venv"
-  "${APP_DIR}/.venv/bin/python" -m pip install --upgrade pip
+  runuser -u "${SERVICE_USER}" -- python3 -m venv "${APP_DIR}/.venv"
+  runuser -u "${SERVICE_USER}" -- "${APP_DIR}/.venv/bin/python" -m pip install --upgrade pip
 fi
 if [[ -f "${APP_DIR}/requirements.lock" ]]; then
-  (cd "${APP_DIR}" && "${APP_DIR}/.venv/bin/python" -m pip install -r requirements.lock)
+  runuser -u "${SERVICE_USER}" -- bash -c "cd '${APP_DIR}' && '${APP_DIR}/.venv/bin/python' -m pip install -r requirements.lock"
 else
-  "${APP_DIR}/.venv/bin/python" -m pip install -e "${APP_DIR}"
+  runuser -u "${SERVICE_USER}" -- "${APP_DIR}/.venv/bin/python" -m pip install -e "${APP_DIR}"
 fi
 
 if [[ ! -f "${CONFIG_DIR}/userbot.env" ]]; then
