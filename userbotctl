@@ -167,8 +167,8 @@ show_logs() {
 update_code() {
   if is_system_mode; then
     require_root_for_system update
-    git -C "${APP_DIR}" pull --ff-only
-    (cd "${APP_DIR}" && "${PYTHON}" -m pip install -r requirements.lock)
+    run_as_service_user git -C "${APP_DIR}" pull --ff-only
+    run_as_service_user bash -c "cd '${APP_DIR}' && '${PYTHON}' -m pip install -r requirements.lock"
     systemctl_cmd restart "${SERVICE_NAME}"
   else
     git -C "${APP_DIR}" pull --ff-only

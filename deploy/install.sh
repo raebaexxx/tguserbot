@@ -17,7 +17,7 @@ install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 700 "${APP_DIR}" "${DATA
 install -d -o root -g "${SERVICE_USER}" -m 750 "${CONFIG_DIR}"
 
 if [[ -d "${APP_DIR}/.git" ]]; then
-  git -C "${APP_DIR}" pull --ff-only
+  runuser -u "${SERVICE_USER}" -- git -C "${APP_DIR}" pull --ff-only
 else
   git clone "${REPO_URL}" "${APP_DIR}"
   chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}"
