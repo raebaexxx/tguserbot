@@ -34,6 +34,7 @@ class FakeEvent:
         self.sender_id = sender_id
         self.responses: list[str] = []
         self.files: list[str] = []
+        self.edited: list[str] = []
         self.deleted = False
 
     async def respond(self, text: str | None = None, *, file: str | None = None, **kwargs) -> None:
@@ -41,6 +42,9 @@ class FakeEvent:
             self.files.append(file)
         if text is not None:
             self.responses.append(text)
+
+    async def edit_text(self, text: str, **kwargs) -> None:
+        self.edited.append(text)
 
     async def delete(self) -> None:
         self.deleted = True
@@ -59,15 +63,26 @@ def test_tiktok_owner_downloads_and_deletes_command() -> None:
         context = FakeContext()
         plugin.ctx = context
         plugin.download_lock = asyncio.Lock()
+        plugin.progress_lock = asyncio.Lock()
 
-        def fake_download(url: str, temporary_dir: Path) -> Path:
+        def fake_download(url: str, temporary_dir: Path, progress_hook) -> Path:
             assert url == "https://vm.tiktok.com/example/"
+            progress_hook(
+                {
+                    "status": "downloading",
+                    "downloaded_bytes": 512,
+                    "total_bytes": 1024,
+                    "speed": 256,
+                    "eta": 1,
+                }
+            )
+            progress_hook({"status": "finished"})
             path = temporary_dir / "video.mp4"
             path.write_bytes(b"video")
             return path
 
         plugin._download_sync = fake_download
-        event = FakeEvent("/ub tiktok https://vm.tiktok.com/example/")
+        event = FakeEvent("/ub tt https://vm.tiktok.com/example/")
         await plugin.handle_command(
             SimpleNamespace(event=event, args=event.raw_text.split(" ", 2)[2])
         )
@@ -76,23 +91,26 @@ def test_tiktok_owner_downloads_and_deletes_command() -> None:
         assert event.deleted
         assert not await asyncio.to_thread(Path(event.files[0]).exists)
         assert not event.responses
+        assert any("0%" in text for text in event.edited)
+        assert any("Отправляю видео" in text for text in event.edited)
         cleanup_loaded_plugin(loaded)
 
     asyncio.run(scenario())
 
 
-def test_tiktok_rejects_non_tiktok_url_and_still_cleans_message() -> None:
+def test_tiktok_rejects_non_tiktok_url_and_leaves_error_status() -> None:
     async def scenario() -> None:
         loaded, _ = loaded_tiktok()
         plugin = loaded.instance
         plugin.ctx = FakeContext()
         plugin.download_lock = asyncio.Lock()
-        event = FakeEvent("/ub tiktok https://example.com/video")
+        plugin.progress_lock = asyncio.Lock()
+        event = FakeEvent("/ub tt https://example.com/video")
         await plugin.handle_command(SimpleNamespace(event=event, args="https://example.com/video"))
 
-        assert event.responses
-        assert "tiktok.com" in event.responses[0]
-        assert event.deleted
+        assert event.edited
+        assert "tiktok.com" in event.edited[-1]
+        assert not event.deleted
         cleanup_loaded_plugin(loaded)
 
     asyncio.run(scenario())
@@ -104,7 +122,8 @@ def test_tiktok_ignores_non_owner_direct_command() -> None:
         plugin = loaded.instance
         plugin.ctx = FakeContext()
         plugin.download_lock = asyncio.Lock()
-        event = FakeEvent("/tiktok https://vm.tiktok.com/example/", sender_id=2)
+        plugin.progress_lock = asyncio.Lock()
+        event = FakeEvent("/tt https://vm.tiktok.com/example/", sender_id=2)
         await plugin.handle_direct_command(event)
         assert not event.deleted
         assert not event.responses

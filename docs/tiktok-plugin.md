@@ -1,21 +1,25 @@
 # TikTok plugin
 
 The `tiktok` plugin downloads a public TikTok video with `yt-dlp`, sends it to
-the same chat, and deletes the command message after the upload attempt.
+the same chat, and deletes the command message after a successful upload.
 
 ## Usage
 
 From the owner account:
 
 ```text
-/ub tiktok https://www.tiktok.com/@user/video/123456789
+/ub tt https://www.tiktok.com/@user/video/123456789
 ```
 
 The direct form is also supported:
 
 ```text
-/tiktok https://vm.tiktok.com/short-link/
+/tt https://vm.tiktok.com/short-link/
 ```
+
+The command message is edited in place while the file is downloading, showing
+percentage, downloaded/total bytes, speed, and ETA. After a successful upload it
+is deleted. On failure it remains as an error status so the reason is not lost.
 
 The plugin accepts only one HTTPS URL whose host is `tiktok.com` or
 `tiktokv.com`. Playlists, private/authenticated content, DRM bypass, and

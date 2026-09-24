@@ -72,7 +72,7 @@ def test_manager_load_reload_disable_enable() -> None:
             "notes",
             "status",
             "echo",
-            "tiktok",
+            "tt",
         }
 
         await manager.reload_local("echo")
