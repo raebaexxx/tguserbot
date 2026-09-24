@@ -39,7 +39,8 @@ if [[ ! -f "${CONFIG_DIR}/userbot.env" ]]; then
 fi
 
 install -o root -g root -m 644 "${APP_DIR}/deploy/systemd/tguserbot.service" /etc/systemd/system/tguserbot.service
-install -o root -g root -m 755 "${APP_DIR}/userbotctl" /usr/local/bin/tguserbotctl
+rm -f /usr/local/bin/tguserbotctl
+ln -s "${APP_DIR}/userbotctl" /usr/local/bin/tguserbotctl
 systemctl daemon-reload
 systemctl enable tguserbot.service
 

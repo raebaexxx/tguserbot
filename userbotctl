@@ -12,7 +12,15 @@ resolve_script_dir() {
   cd -P "$(dirname "${source}")" && pwd
 }
 
-APP_DIR="${TGUSERBOT_APP_DIR:-$(resolve_script_dir)}"
+SCRIPT_DIR="$(resolve_script_dir)"
+if [[ -n "${TGUSERBOT_APP_DIR:-}" ]]; then
+  APP_DIR="${TGUSERBOT_APP_DIR}"
+elif [[ -x "/opt/tguserbot/userbotctl" && -f "/etc/systemd/system/tguserbot.service" ]]; then
+  # Older installations copied this wrapper instead of creating a symlink.
+  APP_DIR="/opt/tguserbot"
+else
+  APP_DIR="${SCRIPT_DIR}"
+fi
 SERVICE_NAME="tguserbot.service"
 SERVICE_USER="tguserbot"
 SYSTEM_ENV_FILE="/etc/tguserbot/userbot.env"
