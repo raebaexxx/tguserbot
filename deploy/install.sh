@@ -39,9 +39,12 @@ if [[ ! -f "${CONFIG_DIR}/userbot.env" ]]; then
 fi
 
 install -o root -g root -m 644 "${APP_DIR}/deploy/systemd/tguserbot.service" /etc/systemd/system/tguserbot.service
+install -o root -g root -m 755 "${APP_DIR}/userbotctl" /usr/local/bin/tguserbotctl
 systemctl daemon-reload
 systemctl enable tguserbot.service
 
 echo "Install complete. Configure ${CONFIG_DIR}/userbot.env, then run:"
+echo "  sudo tguserbotctl auth"
+echo "  sudo tguserbotctl start"
 echo "  sudo -u ${SERVICE_USER} ${APP_DIR}/.venv/bin/python -m userbot auth --root ${APP_DIR} --env-file ${CONFIG_DIR}/userbot.env"
 echo "  systemctl start tguserbot"

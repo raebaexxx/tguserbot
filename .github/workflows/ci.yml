@@ -25,5 +25,7 @@ jobs:
         run: ruff check .
       - name: Mypy
         run: mypy src
+      - name: Shell syntax
+        run: bash -n userbotctl deploy/install.sh
       - name: Tests
         run: pytest

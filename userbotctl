@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+resolve_script_dir() {
+  local source="${BASH_SOURCE[0]}"
+  while [[ -L "${source}" ]]; do
+    local directory
+    directory="$(cd -P "$(dirname "${source}")" && pwd)"
+    source="$(readlink "${source}")"
+    [[ "${source}" != /* ]] && source="${directory}/${source}"
+  done
+  cd -P "$(dirname "${source}")" && pwd
+}
+
+APP_DIR="${TGUSERBOT_APP_DIR:-$(resolve_script_dir)}"
+SERVICE_NAME="tguserbot.service"
+SERVICE_USER="tguserbot"
+SYSTEM_ENV_FILE="/etc/tguserbot/userbot.env"
+LOCAL_ENV_FILE="${APP_DIR}/.env"
+PYTHON="${APP_DIR}/.venv/bin/python"
+
+usage() {
+  cat <<'EOF'
+Usage: userbotctl <command>
+
+Commands:
+  setup       Install/update code, dependencies, and systemd unit
+  auth        Run interactive Telegram authorization
+  start       Start the systemd service (or run locally)
+  stop        Stop the systemd service
+  restart     Restart the systemd service
+  status      Show service status
+  logs        Follow service logs
+  update      Pull the latest code and reinstall locked dependencies
+  help        Show this help
+
+Server examples:
+  sudo tguserbotctl start
+  sudo tguserbotctl status
+  sudo tguserbotctl logs
+
+Local examples:
+  ./userbotctl auth
+  ./userbotctl start
+EOF
+}
+
+is_system_mode() {
+  [[ -f "/etc/systemd/system/${SERVICE_NAME}" && -d "/opt/tguserbot" ]]
+}
+
+require_root_for_system() {
+  if is_system_mode && [[ "${EUID}" -ne 0 ]]; then
+    echo "This command requires root. Try: sudo userbotctl ${1}" >&2
+    exit 1
+  fi
+}
+
+require_python() {
+  if [[ ! -x "${PYTHON}" ]]; then
+    echo "Python environment not found at ${PYTHON}. Run: sudo tguserbotctl setup" >&2
+    exit 1
+  fi
+}
+
+run_as_service_user() {
+  if is_system_mode && [[ "${EUID}" -eq 0 ]]; then
+    runuser -u "${SERVICE_USER}" -- "$@"
+  else
+    "$@"
+  fi
+}
+
+systemctl_cmd() {
+  systemctl "$@"
+}
+
+install_system() {
+  require_root_for_system setup
+  if is_system_mode; then
+    bash "${APP_DIR}/deploy/install.sh"
+  else
+    python3 -m venv "${APP_DIR}/.venv"
+    "${PYTHON}" -m pip install --upgrade pip
+    if [[ -f "${APP_DIR}/requirements.lock" ]]; then
+      (cd "${APP_DIR}" && "${PYTHON}" -m pip install -r requirements.lock)
+    else
+      "${PYTHON}" -m pip install -e "${APP_DIR}"
+    fi
+  fi
+}
+
+run_auth() {
+  require_python
+  local env_file="${TGUSERBOT_ENV_FILE:-}"
+  if [[ -z "${env_file}" ]]; then
+    if is_system_mode; then
+      env_file="${SYSTEM_ENV_FILE}"
+    else
+      env_file="${LOCAL_ENV_FILE}"
+    fi
+  fi
+  if [[ ! -f "${env_file}" ]]; then
+    echo "Environment file not found: ${env_file}" >&2
+    echo "Create it from .env.example and fill in TGUSERBOT_API_ID/TGUSERBOT_API_HASH." >&2
+    exit 1
+  fi
+  run_as_service_user "${PYTHON}" -m userbot auth \
+    --root "${APP_DIR}" --env-file "${env_file}"
+}
+
+start_service() {
+  if is_system_mode; then
+    require_root_for_system start
+    systemctl_cmd start "${SERVICE_NAME}"
+    systemctl_cmd --no-pager --full status "${SERVICE_NAME}"
+  else
+    require_python
+    exec "${PYTHON}" -m userbot run \
+      --root "${APP_DIR}" --env-file "${LOCAL_ENV_FILE}"
+  fi
+}
+
+stop_service() {
+  if is_system_mode; then
+    require_root_for_system stop
+    systemctl_cmd stop "${SERVICE_NAME}"
+  else
+    echo "Local mode has no service manager; stop the foreground process with Ctrl+C." >&2
+    exit 1
+  fi
+}
+
+restart_service() {
+  if is_system_mode; then
+    require_root_for_system restart
+    systemctl_cmd restart "${SERVICE_NAME}"
+    systemctl_cmd --no-pager --full status "${SERVICE_NAME}"
+  else
+    echo "Local mode has no service manager; stop and start the foreground process." >&2
+    exit 1
+  fi
+}
+
+show_status() {
+  if is_system_mode; then
+    systemctl_cmd --no-pager --full status "${SERVICE_NAME}"
+  else
+    echo "Local mode: service is managed by the foreground process."
+    if [[ -f "${APP_DIR}/var/logs/userbot.log" ]]; then
+      tail -n 30 "${APP_DIR}/var/logs/userbot.log"
+    fi
+  fi
+}
+
+show_logs() {
+  if is_system_mode; then
+    systemctl_cmd --no-pager --full status "${SERVICE_NAME}" >/dev/null || true
+    journalctl -u "${SERVICE_NAME}" -f
+  else
+    require_python
+    touch "${APP_DIR}/var/logs/userbot.log"
+    tail -f "${APP_DIR}/var/logs/userbot.log"
+  fi
+}
+
+update_code() {
+  if is_system_mode; then
+    require_root_for_system update
+    git -C "${APP_DIR}" pull --ff-only
+    (cd "${APP_DIR}" && "${PYTHON}" -m pip install -r requirements.lock)
+    systemctl_cmd restart "${SERVICE_NAME}"
+  else
+    git -C "${APP_DIR}" pull --ff-only
+    (cd "${APP_DIR}" && "${PYTHON}" -m pip install -r requirements.lock)
+  fi
+}
+
+command="${1:-help}"
+case "${command}" in
+  setup) install_system ;;
+  auth) run_auth ;;
+  start) start_service ;;
+  stop) stop_service ;;
+  restart) restart_service ;;
+  status) show_status ;;
+  logs) show_logs ;;
+  update) update_code ;;
+  help|-h|--help) usage ;;
+  *)
+    echo "Unknown command: ${command}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

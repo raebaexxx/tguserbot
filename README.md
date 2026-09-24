@@ -114,6 +114,13 @@ folders, pass the plugin folder as the fourth argument, for example
 
 The server template is in `deploy/`. It uses a dedicated systemd service and
 persistent directories under `/var/lib/tguserbot`; Docker is not required.
+After installation, manage it with one command:
+
+```bash
+sudo tguserbotctl start
+sudo tguserbotctl status
+sudo tguserbotctl logs
+```
 
 The repository is public, so secrets and runtime data are intentionally ignored
 by Git. Review `.gitignore` before adding any new generated files.

@@ -26,6 +26,7 @@ The installer creates:
 - persistent data directory `/var/lib/tguserbot`;
 - systemd unit `tguserbot.service`.
 
+It also installs `/usr/local/bin/tguserbotctl`, a small management wrapper.
 It does not create Telegram credentials and does not start the service.
 
 ## Configure and authenticate
@@ -38,12 +39,19 @@ sudo -u tguserbot /opt/tguserbot/.venv/bin/python -m userbot auth \
   --root /opt/tguserbot --env-file /etc/tguserbot/userbot.env
 ```
 
-After the first successful login, start the service:
+After the first successful login, start the service with one command:
 
 ```bash
-systemctl start tguserbot
-systemctl status tguserbot
-journalctl -u tguserbot -f
+sudo tguserbotctl start
+```
+
+Useful commands:
+
+```bash
+sudo tguserbotctl status
+sudo tguserbotctl logs
+sudo tguserbotctl restart
+sudo tguserbotctl update
 ```
 
 The first start is intentionally read-only apart from the three demo commands.
