@@ -396,7 +396,7 @@ class PluginManager:
             raise PluginLoadError(f"Plugin {name!r} is not an active Git plugin")
         package = await self._git_source.fetch(
             url=runtime.source_url,
-            ref=ref or runtime.source_ref or "HEAD",
+            ref=ref or "HEAD",
             subpath=runtime.source_subpath,
         )
         if package.name != name:

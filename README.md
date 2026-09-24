@@ -103,7 +103,9 @@ owner IDs. The logged-in account is always added to the owner set.
 Local changes under `plugins/` are detected automatically. A failed reload
 leaves the previously active version running. Git sources are not fetched or
 activated automatically; remote sources must be explicitly allowed through
-`TGUSERBOT_GIT_ALLOWED_REPOS`.
+`TGUSERBOT_GIT_ALLOWED_REPOS`. If a repository contains several plugin
+folders, pass the plugin folder as the fourth argument, for example
+`/ub plugin install https://github.com/raebaexxx/tguserbot.git main plugins/notes`.
 
 ## Server deployment
 
