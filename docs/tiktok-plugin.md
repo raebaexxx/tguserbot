@@ -23,8 +23,9 @@ watermark-removal features are not implemented. The maximum download size is
 50 MiB. Downloads are serialized per plugin instance and sent through the core
 rate limiter.
 
-The plugin uses `ffmpeg` when yt-dlp needs to merge formats. The current server
-already has ffmpeg installed.
+The plugin uses `yt-dlp` with `curl-cffi` for TikTok browser impersonation and
+uses `ffmpeg` when yt-dlp needs to merge formats. The current server already
+has ffmpeg installed.
 
 Use this only for videos you own or have permission to download and send. Do
 not use it for bulk unsolicited forwarding or content you are not allowed to

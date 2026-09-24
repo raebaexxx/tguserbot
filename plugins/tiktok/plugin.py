@@ -162,7 +162,6 @@ class Plugin(BasePlugin):
             "format": "best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "noplaylist": True,
-            "max_downloads": 1,
             "max_filesize": MAX_FILE_SIZE,
             "retries": 3,
             "fragment_retries": 3,

@@ -12,6 +12,7 @@ authors = [{ name = "raebaexxx" }]
 dependencies = [
     "telethon==1.45.0",
     "yt-dlp==2026.8.19",
+    "curl-cffi==0.16.3",
 ]
 
 [project.optional-dependencies]
