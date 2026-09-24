@@ -1,0 +1,6 @@
+name = "notes"
+version = "0.1.0"
+api = "1"
+entrypoint = "plugin:Plugin"
+description = "Per-chat notes stored in SQLite"
+schema_version = 1

@@ -1,0 +1,32 @@
+[Unit]
+Description=Telegram userbot with plugin manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tguserbot
+Group=tguserbot
+WorkingDirectory=/opt/tguserbot
+EnvironmentFile=/etc/tguserbot/userbot.env
+ExecStart=/opt/tguserbot/.venv/bin/python -m userbot run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/tguserbot
+
+[Install]
+WantedBy=multi-user.target

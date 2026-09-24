@@ -1,0 +1,6 @@
+name = "status"
+version = "0.1.0"
+api = "1"
+entrypoint = "plugin:Plugin"
+description = "Read-only userbot health information"
+schema_version = 1

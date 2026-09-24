@@ -1,0 +1,6 @@
+name = "echo"
+version = "0.1.0"
+api = "1"
+entrypoint = "plugin:Plugin"
+description = "Owner-only echo and ping test handlers"
+schema_version = 1
