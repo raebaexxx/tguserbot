@@ -39,7 +39,14 @@ sudo -u tguserbot /opt/tguserbot/.venv/bin/python -m userbot auth \
   --root /opt/tguserbot --env-file /etc/tguserbot/userbot.env
 ```
 
-After the first successful login, start the service with one command:
+After filling the credentials, install, authorize, and start everything with
+one command:
+
+```bash
+sudo tguserbotctl first-run
+```
+
+For subsequent starts use:
 
 ```bash
 sudo tguserbotctl start

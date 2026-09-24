@@ -25,6 +25,7 @@ Usage: userbotctl <command>
 
 Commands:
   setup       Install/update code, dependencies, and systemd unit
+  first-run   Install, authorize, and start in one command
   auth        Run interactive Telegram authorization
   start       Start the systemd service (or run locally)
   stop        Stop the systemd service
@@ -35,6 +36,7 @@ Commands:
   help        Show this help
 
 Server examples:
+  sudo tguserbotctl first-run
   sudo tguserbotctl start
   sudo tguserbotctl status
   sudo tguserbotctl logs
@@ -177,8 +179,15 @@ update_code() {
 }
 
 command="${1:-help}"
+first_run() {
+  install_system
+  run_auth
+  start_service
+}
+
 case "${command}" in
   setup) install_system ;;
+  first-run) first_run ;;
   auth) run_auth ;;
   start) start_service ;;
   stop) stop_service ;;

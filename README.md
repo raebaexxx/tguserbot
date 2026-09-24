@@ -117,6 +117,7 @@ persistent directories under `/var/lib/tguserbot`; Docker is not required.
 After installation, manage it with one command:
 
 ```bash
+sudo tguserbotctl first-run
 sudo tguserbotctl start
 sudo tguserbotctl status
 sudo tguserbotctl logs
