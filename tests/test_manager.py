@@ -11,6 +11,16 @@ from userbot.rate_limit import RateLimiter
 from userbot.storage import Storage
 
 
+class FakeEvent:
+    def __init__(self, text: str, sender_id: int = 1) -> None:
+        self.raw_text = text
+        self.sender_id = sender_id
+        self.responses: list[str] = []
+
+    async def respond(self, text: str, **kwargs) -> None:
+        self.responses.append(text)
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.handlers: list[tuple[object, object]] = []
@@ -67,6 +77,36 @@ def test_manager_load_reload_disable_enable() -> None:
         await manager.enable("echo")
         assert len(client.handlers) == 1
         assert "echo" in {item.name for item in dispatcher.commands()}
+
+        await manager.shutdown()
+        await storage.close()
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
+def test_demo_commands_are_dispatched() -> None:
+    async def scenario(tmp_path: Path) -> None:
+        manager, storage, client, dispatcher = make_manager(tmp_path)
+        await storage.initialize()
+        await manager.load_all_local()
+        event = FakeEvent("/ub echo hello")
+        await dispatcher.handle_event(event)
+        assert event.responses == ["hello"]
+
+        note_event = FakeEvent("/ub add-note первая заметка")
+        await dispatcher.handle_event(note_event)
+        assert note_event.responses == ["Неизвестная команда. Отправьте /ub help"]
+
+        note_event = FakeEvent("/ub notes add первая заметка")
+        await dispatcher.handle_event(note_event)
+        assert note_event.responses and note_event.responses[0].startswith("Заметка #")
+
+        list_event = FakeEvent("/ub notes list")
+        await dispatcher.handle_event(list_event)
+        assert list_event.responses and "первая заметка" in list_event.responses[0]
 
         await manager.shutdown()
         await storage.close()
