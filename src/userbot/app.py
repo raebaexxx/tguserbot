@@ -127,7 +127,7 @@ class UserbotApp:
                 return
             if action == "reload" and len(parts) >= 2:
                 name = parts[1]
-                runtime = self.manager._runtimes.get(name)
+                runtime = self.manager.get_runtime(name)
                 if runtime is None:
                     await command.respond(f"Плагин {name} не найден.")
                     return
