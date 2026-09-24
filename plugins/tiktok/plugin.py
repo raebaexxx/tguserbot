@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -11,7 +12,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from telethon import events
-from yt_dlp import YoutubeDL
 
 from userbot.commands import CommandContext
 from userbot.plugin_api import Plugin as BasePlugin
@@ -157,6 +157,9 @@ class Plugin(BasePlugin):
             await self._delete_command(event)
 
     def _download_sync(self, url: str, temporary_dir: Path) -> Path:
+        os.environ.setdefault("YTDLP_NO_PLUGINS", "1")
+        from yt_dlp import YoutubeDL
+
         options = {
             "outtmpl": str(temporary_dir / "video.%(ext)s"),
             "format": "best[ext=mp4]/best",
