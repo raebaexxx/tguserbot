@@ -75,6 +75,12 @@ class PluginManager:
             name = state.get("name")
             if not name or state.get("source") != "git" or name in self._disabled:
                 continue
+            if str(name) in self.discover_local_names():
+                self.logger.error(
+                    "Git plugin %s conflicts with a local plugin and was not loaded",
+                    name,
+                )
+                continue
             if state.get("status") not in {"active", "unloaded", "failed"}:
                 continue
             source_ref = state.get("source_ref")
@@ -113,6 +119,9 @@ class PluginManager:
 
     def is_disabled(self, name: str) -> bool:
         return name in self._disabled
+
+    def get_runtime(self, name: str) -> PluginRuntime | None:
+        return self._runtimes.get(name)
 
     async def load_local(self, name: str, *, force: bool = False) -> PluginRuntime | None:
         if name in self._disabled:
@@ -358,6 +367,8 @@ class PluginManager:
         subpath: str | None = None,
     ) -> PluginRuntime:
         package = await self._git_source.fetch(url=url, ref=ref, subpath=subpath)
+        if package.name in self.discover_local_names() and self._runtimes.get(package.name) is None:
+            raise PluginLoadError(f"Git plugin {package.name!r} conflicts with a local plugin")
         old = self._runtimes.get(package.name)
         if old is not None:
             await self.unload(package.name)
@@ -367,7 +378,7 @@ class PluginManager:
                 path=package.path,
                 source="git",
                 source_ref=package.commit,
-                source_url=url,
+                source_url=package.url,
                 source_subpath=package.subpath,
                 force=True,
             )

@@ -57,7 +57,11 @@ class CommandDispatcher:
         if not callable(callback):
             raise TypeError("Command callback must be callable")
         normalized_aliases = tuple(
-            dict.fromkeys(self._normalize(alias) for alias in aliases if self._normalize(alias))
+            dict.fromkeys(
+                self._normalize(alias)
+                for alias in aliases
+                if self._normalize(alias) and self._normalize(alias) != normalized
+            )
         )
         for candidate in (normalized, *normalized_aliases):
             if candidate in self._commands:

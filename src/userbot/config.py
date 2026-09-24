@@ -89,7 +89,8 @@ class Settings:
         _read_dotenv(dotenv_path)
 
         try:
-            api_id = int(os.environ.get("TGUSERBOT_API_ID", "0"))
+            raw_api_id = os.environ.get("TGUSERBOT_API_ID", "").strip()
+            api_id = int(raw_api_id or "0")
         except ValueError as exc:
             raise RuntimeError("TGUSERBOT_API_ID must be an integer") from exc
 
