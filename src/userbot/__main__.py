@@ -28,16 +28,12 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--env-file", type=Path, default=None)
     args = parser.parse_args()
-    settings = Settings.from_env(args.root, env_file=args.env_file)
-    if args.command == "auth":
-        try:
-            asyncio.run(_authenticate(settings))
-        except Exception as exc:
-            print(f"Ошибка авторизации: {exc}")
-            return 1
-        return 0
     app: UserbotApp | None = None
     try:
+        settings = Settings.from_env(args.root, env_file=args.env_file)
+        if args.command == "auth":
+            asyncio.run(_authenticate(settings))
+            return 0
         app = UserbotApp(settings)
         asyncio.run(app.run())
     except KeyboardInterrupt:
@@ -46,7 +42,7 @@ def main() -> int:
     except Exception as exc:
         if app is not None:
             app.logger.exception("Fatal userbot error")
-        print(f"Ошибка запуска: {exc}")
+        print(f"Ошибка: {exc}")
         return 1
     return 0
 
