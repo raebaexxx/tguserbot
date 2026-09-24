@@ -34,7 +34,8 @@ Edit `/etc/tguserbot/userbot.env` as root. Put the `api_id` and `api_hash` there
 do not put them in Git or send them in chat. Then authenticate interactively:
 
 ```bash
-sudo -u tguserbot /opt/tguserbot/.venv/bin/python -m userbot auth
+sudo -u tguserbot /opt/tguserbot/.venv/bin/python -m userbot auth \
+  --root /opt/tguserbot --env-file /etc/tguserbot/userbot.env
 ```
 
 After the first successful login, start the service:

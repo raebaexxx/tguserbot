@@ -43,5 +43,5 @@ systemctl daemon-reload
 systemctl enable tguserbot.service
 
 echo "Install complete. Configure ${CONFIG_DIR}/userbot.env, then run:"
-echo "  sudo -u ${SERVICE_USER} ${APP_DIR}/.venv/bin/python -m userbot auth"
+echo "  sudo -u ${SERVICE_USER} ${APP_DIR}/.venv/bin/python -m userbot auth --root ${APP_DIR} --env-file ${CONFIG_DIR}/userbot.env"
 echo "  systemctl start tguserbot"

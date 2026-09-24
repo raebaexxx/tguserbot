@@ -26,8 +26,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="userbot")
     parser.add_argument("command", nargs="?", choices=("run", "auth"), default="run")
     parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument("--env-file", type=Path, default=None)
     args = parser.parse_args()
-    settings = Settings.from_env(args.root)
+    settings = Settings.from_env(args.root, env_file=args.env_file)
     if args.command == "auth":
         try:
             asyncio.run(_authenticate(settings))

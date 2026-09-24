@@ -20,6 +20,23 @@ def test_settings_reads_credentials_and_paths(tmp_path: Path, monkeypatch) -> No
     assert settings.session_path.name == "session"
 
 
+def test_settings_can_read_an_explicit_env_file(tmp_path: Path, monkeypatch) -> None:
+    for key in (
+        "TGUSERBOT_API_ID",
+        "TGUSERBOT_API_HASH",
+        "TGUSERBOT_OWNER_IDS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    env_file = tmp_path / "service.env"
+    env_file.write_text(
+        "TGUSERBOT_API_ID=456\nTGUSERBOT_API_HASH=secret\nTGUSERBOT_OWNER_IDS=99\n",
+        encoding="utf-8",
+    )
+    settings = Settings.from_env(tmp_path, env_file=env_file)
+    assert settings.api_id == 456
+    assert settings.owner_ids == frozenset({99})
+
+
 def test_storage_round_trip_and_plugin_state(tmp_path: Path) -> None:
     async def scenario() -> None:
         storage = Storage(tmp_path / "runtime.sqlite3")

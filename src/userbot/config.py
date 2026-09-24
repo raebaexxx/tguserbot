@@ -77,9 +77,16 @@ class Settings:
             raise RuntimeError("TGUSERBOT_API_HASH is missing")
 
     @classmethod
-    def from_env(cls, root_dir: Path | None = None) -> Settings:
+    def from_env(
+        cls,
+        root_dir: Path | None = None,
+        env_file: Path | None = None,
+    ) -> Settings:
         root = (root_dir or Path(os.environ.get("TGUSERBOT_ROOT", Path.cwd()))).resolve()
-        _read_dotenv(root / ".env")
+        dotenv_path = env_file or (root / ".env")
+        if not dotenv_path.is_absolute():
+            dotenv_path = root / dotenv_path
+        _read_dotenv(dotenv_path)
 
         try:
             api_id = int(os.environ.get("TGUSERBOT_API_ID", "0"))
