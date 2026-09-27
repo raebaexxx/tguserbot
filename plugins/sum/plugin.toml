@@ -20,6 +20,17 @@ max_message_count = 50
 #: Environment variables holding the API key, same as the `ai` plugin.
 api_key_env = "TGUSERBOT_GEMINI_API_KEY, TGUSERBOT_GEMINI_API_KEYS"
 chat_model = "gemini-3.8-flash"
+#: Models tried in order when one runs out of quota. The free tier's daily
+#: allowance is per model, so a second model is the difference between a slower
+#: answer and none. Verified live: with 3.8-flash exhausted, 3.7 and 3.6 answer.
+#: Put the model you actually want first; the rest are the floor.
+model_fallbacks = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+]
+
 base_url = "https://generativelanguage.googleapis.com/v1beta"
 timeout_seconds = 180
 max_output_tokens = 2046

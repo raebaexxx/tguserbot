@@ -456,3 +456,57 @@ def plugin_config(values: dict[str, Any] | None = None, name: str = "test") -> P
 
 
 PluginFactory = Callable[..., Path]
+
+
+class RouterFor:
+    """A ``ModelRouter`` stand-in over a plain client double.
+
+    The plugins hold a router rather than a client, because quota fallback
+    belongs between them. Rather than rewrite every double into a router, this
+    forwards to one and reports a key so ``require_router`` accepts it.
+    """
+
+    def __init__(self, client: Any, *, has_key: bool | None = None) -> None:
+        self._client = client
+        #: Overridable so a test can simulate a missing key without a real one.
+        self._has_key = has_key
+
+    @property
+    def has_key(self) -> bool:
+        if self._has_key is not None:
+            return self._has_key
+        return bool(getattr(self._client, "has_key", True))
+
+    @has_key.setter
+    def has_key(self, value: bool) -> None:
+        self._has_key = value
+
+    @property
+    def active(self) -> str:
+        return "test-model"
+
+    @property
+    def degraded(self) -> bool:
+        return False
+
+    def notice(self) -> str:
+        return ""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    async def aclose(self) -> None:
+        closer = getattr(self._client, "aclose", None)
+        if closer is not None:
+            await closer()
+
+
+def routers_for(module: Any, client: Any) -> dict[str, Any]:
+    """One stand-in router per role, as the ai plugin now holds.
+
+    A single shared double is deliberate: these tests are about delivery and
+    configuration, not about which role routes where. ``test_gemini_wiring``
+    covers the routing itself with the real thing.
+    """
+    roles = getattr(module, "ROLES", ("chat",))
+    return {kind: RouterFor(client) for kind in roles}

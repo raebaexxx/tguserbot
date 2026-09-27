@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from conftest import FakeClient, plugin_config, shipped_module
+from conftest import FakeClient, RouterFor, plugin_config, shipped_module
 from userbot.config import Settings
 from userbot.rate_limit import RateLimiter
 
@@ -136,8 +136,9 @@ def build(
 
     plugin = module.Plugin()
     plugin.ctx = ctx
-    plugin.client = RecordingClient()
-    return plugin, ctx, telegram, plugin.client
+    plugin.router = RouterFor(RecordingClient())
+    # The last value is the Gemini double, so a test can inspect what was sent.
+    return plugin, ctx, telegram, plugin.router
 
 
 # --- arguments --------------------------------------------------------------

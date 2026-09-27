@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from conftest import FakeContext, FakeEvent, plugin_config, shipped_module
+from conftest import FakeContext, FakeEvent, plugin_config, routers_for, shipped_module
 
 
 @pytest.fixture(scope="module")
@@ -100,7 +100,7 @@ def make_context(tmp_path: Any, values: dict[str, Any] | None = None) -> Any:
 def make_plugin(ai_module: Any, tmp_path: Any, client: Any = None, **config: Any) -> Any:
     plugin = ai_module.Plugin()
     plugin.ctx = make_context(tmp_path, config)
-    plugin.client = client if client is not None else FakeClient()
+    plugin.routers = routers_for(ai_module, client if client is not None else FakeClient())
     return plugin
 
 
@@ -268,10 +268,12 @@ def test_the_key_variable_is_configurable(ai_module: Any) -> None:
 
 
 def test_a_missing_key_is_reported_clearly(ai_module: Any, tmp_path: Any) -> None:
+    from userbot.gemini import MissingKeyError
+
     plugin = make_plugin(ai_module, tmp_path, client=FakeClient())
-    plugin.client.has_key = False
-    with pytest.raises(ai_module.MissingKeyError, match="TGUSERBOT_GEMINI_API_KEY"):
-        plugin.require_client()
+    plugin.routers["chat"].has_key = False
+    with pytest.raises(MissingKeyError, match="TGUSERBOT_GEMINI_API_KEY"):
+        plugin.require_router()
 
 
 def test_models_come_from_configuration(ai_module: Any, tmp_path: Any) -> None:

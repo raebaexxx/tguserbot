@@ -35,7 +35,7 @@ import json
 import logging
 import os
 import random
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -61,6 +61,17 @@ class GeminiError(RuntimeError):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+
+
+class QuotaExhausted(GeminiError):
+    """The model's allowance is spent, and waiting will not bring it back.
+
+    Separate from a rate limit, which shares the 429 and the
+    ``RESOURCE_EXHAUSTED`` status but clears in a minute. Gemini's own message is
+    the only thing that tells them apart, and guessing wrong costs four attempts
+    with backoff on a condition that is bound for midnight. Recoverable by using a
+    different model, not by retrying.
+    """
 
 
 class MissingKeyError(GeminiError):
@@ -180,6 +191,32 @@ def parse_keys(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+#: Phrases that mean the allowance is gone rather than merely busy. Taken from
+#: the API's own wording, captured live when the free tier ran out.
+_QUOTA_MARKERS = (
+    "exceeded your current quota",
+    "check your plan and billing",
+    "billing",
+    "free tier",
+    "quota exceeded",
+    "out of quota",
+)
+
+
+def _is_quota_exhausted(message: str) -> bool:
+    """Whether a 429 means "spent" rather than "slow down".
+
+    Both arrive as 429 with status ``RESOURCE_EXHAUSTED``, so the message is the
+    only signal. A rate limit says "Resource has been exhausted (e.g. check
+    quota)" and clears on its own; a spent quota mentions the plan and does not.
+    """
+    lowered = message.lower()
+    if "resource has been exhausted" in lowered:
+        # The generic form. Only the explicit forms below are conclusive.
+        return any(marker in lowered for marker in _QUOTA_MARKERS)
+    return any(marker in lowered for marker in _QUOTA_MARKERS)
+
+
 def _redact(text: str, keys: Iterable[str]) -> str:
     """Strip any key from text before it reaches a log."""
     for key in keys:
@@ -246,23 +283,36 @@ class GeminiClient:
         return {"x-goog-api-key": key, "content-type": "application/json"}
 
     def _describe(self, response: httpx.Response) -> GeminiError:
-        """Turn an error body into something worth reading in Telegram.
-
-        The API's own ``error.message`` is better than anything invented here,
-        and the key must never appear in it, so it is scrubbed before use.
-        """
-        status = response.status_code
-        detail = ""
         try:
             payload = response.json()
-            message = payload.get("error", {}).get("message")
-            if isinstance(message, str):
-                detail = message
-        except (ValueError, AttributeError):
-            detail = response.text[:200]
-        detail = _redact(detail, self._keys)
+        except ValueError:
+            payload = {"error": {"message": response.text[:200]}}
+        error = self._describe_error(response.status_code, payload)
+        # Scrub here, where the keys are in scope. The classifier is static and
+        # knows nothing about them, so an error body that echoed the key would
+        # otherwise travel straight into a Telegram reply.
+        return type(error)(
+            _redact(str(error), self._keys),
+            status=error.status,
+            retryable=error.retryable,
+        )
+
+    @staticmethod
+    def _describe_error(status: int, payload: dict[str, Any]) -> GeminiError:
+        """Turn an error body into something worth reading in Telegram.
+
+        The API's own ``error.message`` is better than anything invented here.
+        A spent quota is singled out because it is the one 429 that a different
+        model can answer and a retry cannot.
+        """
+        error = payload.get("error") or {}
+        detail = error.get("message") if isinstance(error, dict) else None
+        if not isinstance(detail, str):
+            detail = ""
         if not detail:
-            detail = response.reason_phrase or "запрос отклонён"
+            detail = "запрос отклонён"
+        if status == 429 and _is_quota_exhausted(detail):
+            return QuotaExhausted(f"Gemini: {detail}", status=status, retryable=False)
         return GeminiError(f"Gemini: {detail}", status=status, retryable=status in RETRY_STATUS)
 
     async def _request(
@@ -506,3 +556,168 @@ def keys_from_env(*names: str) -> list[str]:
         if found:
             return found
     return []
+
+
+class ModelRouter:
+    """Tries models in order and remembers the one that answered.
+
+    A single configured model is not a fallback: when its quota runs out, the
+    only thing left to do is fail. That is not hypothetical -- the free-tier daily
+    allowance on the configured default was spent, and every question after it
+    produced an error until a second model was tried.
+
+    Two rules keep this from being worse than the failure it fixes:
+
+    * **Only a spent quota moves the chain on.** A 404, a bad key, a blocked
+      request: those are not going to be answered by a different model, and
+      retrying them elsewhere just multiplies the error.
+    * **The working model is remembered, and the chain only forgets when that
+      model fails too.** Otherwise every question re-probes a dead model and pays
+      a 429 before getting an answer.
+    """
+
+    def __init__(
+        self,
+        models: Sequence[str],
+        *,
+        client: GeminiClient | None = None,
+        key_getter: Callable[[], list[str]] | None = None,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float | None = None,
+    ) -> None:
+        unique: list[str] = []
+        for name in models:
+            name = str(name).strip()
+            # A duplicate is a wasted request, and a second probe of a dead model.
+            if name and name not in unique:
+                unique.append(name)
+        if not unique:
+            raise ValueError("a model router needs at least one model")
+        self.models = tuple(unique)
+        #: None means "whatever the client defaults to", so there is only one
+        #: number to keep correct rather than a second copy of it here.
+        self.timeout = timeout
+        self._base_url = base_url
+        self._key_getter = key_getter
+        self._client = client
+        self._owns_client = client is None
+        self._active: str | None = None
+        self._exhausted: set[str] = set()
+
+    # -- state ------------------------------------------------------------
+
+    @property
+    def has_key(self) -> bool:
+        """Whether a key is configured at all.
+
+        Asked of the router rather than tracked beside it, so there is one place
+        that knows whether a request can be made and nothing to keep in step.
+        """
+        client = self._get_client()
+        return bool(getattr(client, "has_key", False))
+
+    @property
+    def active(self) -> str:
+        """The model that will be tried first."""
+        for name in self._ordered():
+            return name
+        return self.models[0]
+
+    @property
+    def degraded(self) -> bool:
+        """Whether the configured first choice is not the one in use."""
+        return self._active is not None and self._active != self.models[0]
+
+    def notice(self) -> str:
+        """A line for the user, only when something is worth saying."""
+        if not self.degraded:
+            return ""
+        return f"Модель {self.models[0]} недоступна (квота исчерпана), отвечает {self._active}."
+
+    def reset(self) -> None:
+        """Forget what was learned, so the chain probes from the top again."""
+        self._active = None
+        self._exhausted.clear()
+
+    def _ordered(self) -> list[str]:
+        """The remembered model first, then the rest in configured order."""
+        if self._active is not None and self._active in self.models:
+            return [self._active] + [m for m in self.models if m != self._active]
+        return list(self.models)
+
+    # -- client -------------------------------------------------------------
+
+    def _get_client(self) -> GeminiClient:
+        if self._client is None:
+            keys = self._key_getter() if self._key_getter is not None else []
+            extra: dict[str, Any] = {}
+            if self.timeout is not None:
+                extra["timeout"] = self.timeout
+            self._client = GeminiClient(base_url=self._base_url, api_keys=keys, **extra)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+            self._client = None
+
+    async def list_models(self) -> list[ModelInfo]:
+        """Whatever the key can see. Not routed: this is the diagnostic."""
+        return await self._get_client().list_models()
+
+    # -- calls ---------------------------------------------------------------
+
+    async def generate(self, turns: Sequence[Turn], **kwargs: Any) -> Reply:
+        """Answer, moving to the next model when this one's quota is spent."""
+        client = self._get_client()
+        tried: list[str] = []
+        for model in self._ordered():
+            tried.append(model)
+            try:
+                reply = await client.generate(turns, model=model, **kwargs)
+            except QuotaExhausted as exc:
+                self._exhausted.add(model)
+                if model == self._active:
+                    self._active = None
+                logger.warning("Gemini model %s is out of quota: %s", model, exc)
+                continue
+            self._active = model
+            return reply
+        raise QuotaExhausted(
+            "Gemini: квота исчерпана на всех моделях ("
+            + ", ".join(tried)
+            + "). Проверьте план или ключ."
+        )
+
+    async def stream(self, turns: Sequence[Turn], **kwargs: Any) -> AsyncIterator[str]:
+        """Stream, moving to the next model when this one's quota is spent.
+
+        A stream that has already yielded cannot be resumed on another model --
+        the user would see two answers spliced together -- so the switch only
+        happens before the first chunk, which is where a quota refusal lands.
+        """
+        client = self._get_client()
+        tried: list[str] = []
+        for model in self._ordered():
+            tried.append(model)
+            produced = False
+            try:
+                async for piece in client.stream(turns, model=model, **kwargs):
+                    produced = True
+                    self._active = model
+                    yield piece
+            except QuotaExhausted as exc:
+                if produced:
+                    logger.warning("Gemini model %s ran out of quota mid-stream: %s", model, exc)
+                    raise
+                self._exhausted.add(model)
+                if model == self._active:
+                    self._active = None
+                logger.warning("Gemini model %s is out of quota: %s", model, exc)
+                continue
+            return
+        raise QuotaExhausted(
+            "Gemini: квота исчерпана на всех моделях ("
+            + ", ".join(tried)
+            + "). Проверьте план или ключ."
+        )

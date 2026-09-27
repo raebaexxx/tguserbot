@@ -97,6 +97,11 @@ many attachments were sent. Anything that did not fit the size budget is listed
 under "Не учтено" rather than dropped — a summary that quietly ignores half a
 conversation is worse than one that admits it. See `docs/sum-plugin.md`.
 
+Both `sum` and `ai` list fallback models in `model_fallbacks`. The free tier's
+daily allowance is counted per model, so when the configured one is exhausted the
+plugins move to the next and say which model actually answered — instead of
+spending four retries on a quota that resets at midnight.
+
 ## Plugin layout
 
 A plugin is a directory with `plugin.toml`, `__init__.py`, and `plugin.py`:

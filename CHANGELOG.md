@@ -23,8 +23,46 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   development and fail in production, where `ProtectSystem=strict` makes it
   read-only.
 - `PluginConfig.float_value`, for settings that are not whole numbers.
+- `ModelRouter`: tries models in order and remembers the one that answered.
+  The free tier's daily allowance is counted per model, so one configured model
+  is not a fallback — when its quota runs out the only thing left to do is fail.
+  That is not hypothetical: the quota on the configured default was spent, and
+  every question after it produced an error until a second model was tried.
+- `model_fallbacks` in the `ai` and `sum` manifests. When a fallback answers, the
+  plugin says so under the reply, and stays silent when the configured model was
+  the one that worked. When every model's quota is gone, the error names them.
 
 ### Fixed
+
+- **A spent quota was retried four times with backoff.** `429` was classified as
+  retryable, so a condition that cannot recover before midnight was given four
+  attempts, and the real answer was delayed by a minute to arrive as an error.
+  `QuotaExhausted` is now separate from a rate limit, which shares the status and
+  the `RESOURCE_EXHAUSTED` code and does clear in a minute. The API's own message
+  is the only thing that tells them apart, so that is what it keys on.
+- **`/ub ai` was broken by the change that was meant to fix it.** The plugins
+  passed `model=` to the router, which binds `model` itself for each attempt, so
+  every chat and every generation raised `TypeError: got multiple values for
+  keyword argument 'model'`. The suite stayed green because the test double
+  forwards straight to a fake client that accepts anything. Each role now owns a
+  chain, and `tests/test_gemini_wiring.py` runs the real plugin against a real
+  router over a mock transport, so the seam is no longer the one thing untested.
+- **Attachment downloads in `sum` never worked.** `download_media` is a coroutine
+  function in telethon; running it in a thread returned a coroutine, which `Path()`
+  rejected, and the coroutine was then never awaited. Reported as a
+  `TypeError` with a `RuntimeWarning` in the journal, and as a generic
+  "ошибка" in Telegram.
+- **Gemini failures were visible only to whoever was in the chat.** The reason was
+  shown to the user and then discarded, so the journal showed a clean run and the
+  next question about it had to be answered by asking for a screenshot. Both
+  plugins now log the refusal with its reason. The router already logged the quota
+  retries; this covers everything it passes straight through, such as a bad key.
+- **`timeout_seconds` stopped being read.** It was in both manifests and honoured
+  by the plugins, and building the client inside the router dropped it — leaving the
+  setting in the file doing nothing and quietly putting `sum`, which allows 180
+  seconds because it carries a transcript and media, back to the 120 second
+  default. The router takes a timeout again, and `None` defers to the client's own
+  default rather than keeping a second copy of the number to drift.
 
 - **Streaming progress never appeared in production.** The ai plugin edited its
   placeholder with `event.edit_text`, and telethon's `Message` has no such

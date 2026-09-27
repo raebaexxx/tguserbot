@@ -22,9 +22,9 @@ from typing import Any
 
 from userbot.gemini import (
     DEFAULT_BASE_URL,
-    GeminiClient,
     GeminiError,
     MissingKeyError,
+    ModelRouter,
     Part,
     Turn,
     keys_from_env,
@@ -193,10 +193,17 @@ class ProgressEditor:
             await self._flush()
 
 
+#: The roles this plugin routes separately. Each gets its own chain, because the
+#: head of the chain is that role's configured model and the router is what binds
+#: it: one router for both would answer code requests with the chat model and
+#: quietly ignore ``code_model``.
+ROLES = ("chat", "code")
+
+
 class Plugin(BasePlugin):
     def __init__(self) -> None:
         self.ctx: PluginContext | None = None
-        self.client: GeminiClient | None = None
+        self.routers: dict[str, ModelRouter] = {}
         self.generated: dict[str, GeneratedPlugin] = {}
 
     # -- lifecycle ---------------------------------------------------------
@@ -204,11 +211,15 @@ class Plugin(BasePlugin):
     async def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
         keys = keys_from_env(*key_env_names(ctx))
-        self.client = GeminiClient(
-            base_url=ctx.config.str_value("base_url", DEFAULT_BASE_URL),
-            api_keys=keys,
-            timeout=ctx.config.int_value("timeout_seconds", 120),
-        )
+        base_url = ctx.config.str_value("base_url", DEFAULT_BASE_URL)
+        timeout = ctx.config.int_value("timeout_seconds", 120)
+        for kind in ROLES:
+            self.routers[kind] = ModelRouter(
+                _chain(ctx, kind),
+                base_url=base_url,
+                timeout=timeout,
+                key_getter=lambda: keys,
+            )
         ctx.register_command(
             "ai",
             self.handle,
@@ -224,19 +235,20 @@ class Plugin(BasePlugin):
             )
 
     async def stop(self) -> None:
-        if self.client is not None:
-            await self.client.aclose()
-            self.client = None
+        for router in self.routers.values():
+            await router.aclose()
+        self.routers.clear()
 
     # -- helpers -----------------------------------------------------------
 
-    def require_client(self) -> GeminiClient:
-        if self.client is None or not self.client.has_key:
+    def require_router(self, kind: str = "chat") -> ModelRouter:
+        router = self.routers.get(kind)
+        if router is None or not router.has_key:
             raise MissingKeyError(
                 "Ключ Gemini не задан. Добавьте TGUSERBOT_GEMINI_API_KEY в "
                 "/etc/tguserbot/userbot.env и перезапустите сервис."
             )
-        return self.client
+        return router
 
     def model_for(self, ctx: PluginContext, kind: str) -> str:
         key, default = MODELS[kind]
@@ -325,6 +337,12 @@ class Plugin(BasePlugin):
                         )
                     await self.ask(ctx, command, text, kind="chat")
         except (GeminiError, MissingKeyError) as exc:
+            # Also to the log, with the reason. The user is told, and then the
+            # reason is gone: nothing reaches the journal, so the next "it says
+            # something went wrong" can only be answered by asking the user to
+            # screenshot the chat. The router logs the quota retries, so this
+            # line is what covers everything it passes straight through.
+            LOGGER.warning("ai: Gemini refused: %s", exc)
             await command.respond(f"Gemini: {exc}")
         except asyncio.CancelledError:
             raise
@@ -352,7 +370,7 @@ class Plugin(BasePlugin):
         if not text:
             await command.respond(USAGE)
             return
-        client = self.require_client()
+        router = self.require_router(kind)
         await self.ensure_history(ctx)
         await self.remember(ctx, Turn("user", [Part(text=text)]))
         turns = await self.history(ctx)
@@ -362,9 +380,7 @@ class Plugin(BasePlugin):
         worker = asyncio.create_task(editor.run())
         pieces: list[str] = []
         try:
-            async for delta in client.stream(
-                turns, system=CHAT_SYSTEM, model=self.model_for(ctx, kind)
-            ):
+            async for delta in router.stream(turns, system=CHAT_SYSTEM):
                 pieces.append(delta)
                 editor.offer("".join(pieces))
             await editor.finish()
@@ -395,6 +411,11 @@ class Plugin(BasePlugin):
             # Keep the signature so the next turn is a real continuation.
             await self.remember(ctx, Turn("model", [Part(text=answer)]))
         await self._discard(placeholder)
+        notice = router.notice()
+        if notice:
+            # Only when the configured model is not the one that answered, so a
+            # normal run stays silent and a fallback is never mistaken for it.
+            await command.respond(notice)
 
     @staticmethod
     async def _discard(placeholder: Any) -> None:
@@ -409,11 +430,10 @@ class Plugin(BasePlugin):
         if not name or not description:
             await command.respond("Использование: /ub ai new <имя> <описание>")
             return
-        client = self.require_client()
-        reply = await client.generate(
+        router = self.require_router("code")
+        reply = await router.generate(
             [Turn("user", [Part(text=f"Создай плагин {name!r}.\n\n{description}")])],
             system=CODE_SYSTEM,
-            model=self.model_for(ctx, "code"),
             max_output_tokens=ctx.config.int_value("code_output_tokens", 16384),
             response_schema=PLUGIN_SCHEMA,
         )
@@ -439,8 +459,8 @@ class Plugin(BasePlugin):
     # -- staging -----------------------------------------------------------
 
     async def show_models(self, ctx: PluginContext, command: Any) -> None:
-        client = self.require_client()
-        models = await client.list_models()
+        self.require_router()
+        models = await self.require_router("chat").list_models()
         if not models:
             await command.respond("Модели не вернулись.")
             return
@@ -482,6 +502,22 @@ class Plugin(BasePlugin):
         await command.respond(
             f"{name}: {', '.join(sorted(sources))}\n\n{body}\n\nУстановить: /ub plugin adopt {name}"
         )
+
+
+def _chain(ctx: PluginContext, kind: str) -> list[str]:
+    """The models to try, in order, for one role.
+
+    The role's own model first, then the configured chain. Quota is counted per
+    model on the free tier, so having a second one is the difference between a
+    slower answer and none at all.
+    """
+    key, default = MODELS[kind]
+    primary = ctx.config.str_value(key, default)
+    chain = [primary]
+    for name in ctx.config.str_list("model_fallbacks", ()):
+        if name not in chain:
+            chain.append(name)
+    return chain
 
 
 def key_env_names(ctx: PluginContext) -> tuple[str, ...]:

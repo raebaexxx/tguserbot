@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from conftest import FakeEvent, plugin_config, shipped_module
+from conftest import FakeEvent, plugin_config, routers_for, shipped_module
 from userbot.config import Settings
 
 
@@ -165,7 +165,7 @@ def build(
     """A plugin wired to a command, without a real manager or database."""
     plugin = ai_module.Plugin()
     plugin.ctx = Ctx(tmp_path, config)
-    plugin.client = client
+    plugin.routers = routers_for(ai_module, client)
     return plugin, RecordingCommand(args, event)
 
 

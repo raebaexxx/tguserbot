@@ -23,9 +23,9 @@ from typing import Any
 
 from userbot.gemini import (
     DEFAULT_BASE_URL,
-    GeminiClient,
     GeminiError,
     MissingKeyError,
+    ModelRouter,
     Part,
     Turn,
     keys_from_env,
@@ -60,7 +60,7 @@ USAGE = (
 class Plugin(BasePlugin):
     def __init__(self) -> None:
         self.ctx: PluginContext | None = None
-        self.client: GeminiClient | None = None
+        self.router: ModelRouter | None = None
 
     # -- lifecycle --------------------------------------------------------
 
@@ -71,10 +71,14 @@ class Plugin(BasePlugin):
             for part in ctx.config.str_value("api_key_env", "TGUSERBOT_GEMINI_API_KEY").split(",")
             if part.strip()
         )
-        self.client = GeminiClient(
+        self.router = ModelRouter(
+            _chain(ctx),
             base_url=ctx.config.str_value("base_url", DEFAULT_BASE_URL),
-            api_keys=keys_from_env(*names),
+            # Longer than the ai plugin's default: a summary carries a transcript
+            # and, when allowed, media, and a request that times out halfway is
+            # charged for and produces nothing.
             timeout=ctx.config.int_value("timeout_seconds", 180),
+            key_getter=lambda: keys_from_env(*names),
         )
         ctx.register_command(
             "sum",
@@ -82,23 +86,23 @@ class Plugin(BasePlugin):
             help_text=USAGE,
             aliases=("summary", "сводка"),
         )
-        if not self.client.has_key:
+        if not self.router.has_key:
             LOGGER.warning("sum: no API key; /ub sum will say which variable is missing")
         if not ctx.config.bool_value("include_media", False):
             LOGGER.info("sum: media attachments are off (set [sum] include_media = true)")
 
     async def stop(self) -> None:
-        if self.client is not None:
-            await self.client.aclose()
-            self.client = None
+        if self.router is not None:
+            await self.router.aclose()
+            self.router = None
 
-    def require_client(self) -> GeminiClient:
-        if self.client is None or not self.client.has_key:
+    def require_router(self) -> ModelRouter:
+        if self.router is None or not self.router.has_key:
             raise MissingKeyError(
                 "Ключ Gemini не задан. Добавьте TGUSERBOT_GEMINI_API_KEY в "
                 "/etc/tguserbot/userbot.env и перезапустите сервис."
             )
-        return self.client
+        return self.router
 
     # -- argument parsing --------------------------------------------------
 
@@ -145,7 +149,14 @@ class Plugin(BasePlugin):
                     return
                 reply = await self.summarise(ctx, collected)
                 await command.respond(self.compose(collected, reply))
+                notice = self.router.notice() if self.router is not None else ""
+                if notice:
+                    await command.respond(notice)
         except (GeminiError, MissingKeyError) as exc:
+            # The reason goes to the log as well as to the chat: see the note in
+            # the ai plugin. Without it a refusal is only visible to whoever was
+            # in the chat, and the journal shows a clean run.
+            LOGGER.warning("sum: Gemini refused after reading %d messages: %s", count, exc)
             await command.respond(f"Gemini: {exc}")
         except asyncio.CancelledError:
             raise
@@ -231,9 +242,10 @@ class Plugin(BasePlugin):
                     continue
                 target = Path(directory) / f"{index}{Path(str(_name_of(message))).suffix}"
                 try:
-                    got = await asyncio.to_thread(
-                        ctx.client.download_media, message, file=str(target)
-                    )
+                    # telethon's download_media is a coroutine function. Running
+                    # it in a thread and awaiting the result handed a coroutine
+                    # object to Path(), which blew up on every attachment.
+                    got = await ctx.client.download_media(message, file=str(target))
                 except Exception as exc:
                     LOGGER.debug("could not download message %s: %s", index, exc)
                     skipped.append(SkippedMedia(getattr(message, "id", 0), f"{kind}: не скачалось"))
@@ -260,7 +272,7 @@ class Plugin(BasePlugin):
     # -- asking --------------------------------------------------------------
 
     async def summarise(self, ctx: PluginContext, collected: Collected) -> str:
-        client = self.require_client()
+        router = self.require_router()
         payload = await asyncio.to_thread(read_media, collected.media)
         turns = [
             Turn(
@@ -268,10 +280,9 @@ class Plugin(BasePlugin):
                 build_request_parts(collected.transcript, payload, collected.notices()),
             )
         ]
-        reply = await client.generate(
+        reply = await router.generate(
             turns,
             system=SUMMARY_SYSTEM,
-            model=ctx.config.str_value("chat_model", "gemini-3.8-flash"),
             max_output_tokens=ctx.config.int_value("max_output_tokens", 2046),
         )
         return reply.text
@@ -287,6 +298,15 @@ class Plugin(BasePlugin):
         lines = [header, "", body, "", "Не учтено:"]
         lines += [f"• {note}" for note in notices]
         return "\n".join(lines)
+
+
+def _chain(ctx: PluginContext) -> list[str]:
+    """The models to try, in order. The configured one first, then the chain."""
+    chain = [ctx.config.str_value("chat_model", "gemini-3.8-flash")]
+    for name in ctx.config.str_list("model_fallbacks", ()):
+        if name not in chain:
+            chain.append(name)
+    return chain
 
 
 def _name_of(message: Any) -> str:
