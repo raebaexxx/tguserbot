@@ -351,6 +351,18 @@ def test_alert_script_is_sound() -> None:
     text = alert.read_text(encoding="utf-8")
     assert "set -uo pipefail" in text
     assert "except Exception" in text, "alerting must never raise"
+    # An unreadable journal must not suppress the alert: the operator needs to
+    # know the service is down even if the excerpt is missing.
+    assert "sending the alert without it" in text
+
+
+def test_alert_unit_can_read_the_journal() -> None:
+    """The alert unit runs as the service user, which is not in the journal group."""
+    alert = (REPO_ROOT / "deploy" / "systemd" / "tguserbot-alert@.service").read_text(
+        encoding="utf-8"
+    )
+    assert "SupplementaryGroups=systemd-journal" in alert
+    assert "User=tguserbot" in alert
 
 
 def test_unit_runs_as_the_service_user() -> None:

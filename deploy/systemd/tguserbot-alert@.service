@@ -7,6 +7,9 @@ ConditionPathExists=/etc/tguserbot/userbot.env
 Type=oneshot
 User=tguserbot
 Group=tguserbot
+# journalctl needs this group; without it the excerpt cannot be read and the
+# alert silently carried nothing useful.
+SupplementaryGroups=systemd-journal
 WorkingDirectory=/opt/tguserbot
 # The failed process may still hold the session lock; give systemd a moment to
 # reap it before opening a second client on the same data directory.

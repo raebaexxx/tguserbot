@@ -14,9 +14,12 @@ PYTHON="/opt/tguserbot/.venv/bin/python"
 JOURNAL_FILE="$(mktemp)"
 trap 'rm -f "${JOURNAL_FILE}"' EXIT
 
+# A missing excerpt must not stop the alert: the operator still needs to know
+# the service is down. The unit grants the systemd-journal group so this
+# normally succeeds.
 if ! journalctl -u "${SERVICE}" --since "-10 min" --no-pager >"${JOURNAL_FILE}" 2>/dev/null; then
-  echo "alert: cannot read the journal" >&2
-  exit 1
+  echo "alert: cannot read the journal; sending the alert without it" >&2
+  : >"${JOURNAL_FILE}"
 fi
 
 if [[ ! -r /etc/tguserbot/userbot.env ]]; then
