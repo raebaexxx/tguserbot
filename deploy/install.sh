@@ -27,6 +27,7 @@ preflight() {
     || missing+=("python3 >= 3.12")
   if [[ ${#missing[@]} -gt 0 ]]; then
     fail "missing prerequisites: ${missing[*]}"
+    # shellcheck disable=SC2317  # reached indirectly: fail() runs before this
     log "on Debian/Ubuntu: apt-get install -y git python3 python3-venv"
   fi
 }
