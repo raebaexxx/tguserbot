@@ -5,17 +5,14 @@ import inspect
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .health import HealthService
 from .plugin_config import PluginConfig
+from .protocols import EventDispatcher, PluginHost, TelegramClientLike
 from .rate_limit import RateLimiter
 from .storage import PluginStorage, Storage
 from .task_registry import TaskGroup
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .config import Settings
-    from .manager import PluginManager
 
 #: Lifecycle hooks a plugin may implement. ``setup`` receives the context.
 LIFECYCLE_HOOKS = ("migrate", "setup", "start", "stop")
@@ -69,6 +66,10 @@ def validate_plugin_interface(instance: Any) -> None:
             raise PluginContractError(f"{type(instance).__name__} is missing the {hook}() hook")
         if not callable(attribute):
             raise PluginContractError(f"{type(instance).__name__}.{hook} is not callable")
+        if not inspect.iscoroutinefunction(attribute):
+            raise PluginContractError(
+                f"{type(instance).__name__}.{hook} must be a coroutine function"
+            )
     setup_signature = inspect.signature(instance.setup)
     positional = [
         parameter
@@ -102,20 +103,25 @@ class _HandlerRegistration:
 
 
 class PluginContext:
-    """Services and resource tracking exposed to one plugin instance."""
+    """Services and resource tracking exposed to one plugin instance.
+
+    This is the whole surface a plugin is allowed to touch, so it is the place
+    worth typing precisely: the collaborators are declared as protocols rather
+    than ``Any``, which is what finally makes mypy check plugin code.
+    """
 
     def __init__(
         self,
         *,
         plugin_name: str,
         plugin_path: Path,
-        client: Any,
-        settings: Settings,
+        client: TelegramClientLike,
+        settings: Any,
         storage: PluginStorage,
-        dispatcher: Any,
+        dispatcher: EventDispatcher,
         rate_limiter: RateLimiter,
         health: HealthService,
-        manager: PluginManager,
+        manager: PluginHost,
         instance: Any,
         logger: logging.Logger,
         core_storage: Storage | None = None,
@@ -151,7 +157,7 @@ class PluginContext:
         return self.plugin_name
 
     def is_owner(self, sender_id: int | None) -> bool:
-        return sender_id in self.dispatcher.owner_ids
+        return self.dispatcher.is_owner(sender_id)
 
     def register_command(
         self,

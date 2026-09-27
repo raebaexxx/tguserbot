@@ -200,6 +200,9 @@ class CommandDispatcher:
             if current is not None and current.plugin_name == plugin_name:
                 self._commands.pop(candidate, None)
 
+    def is_owner(self, sender_id: int | None) -> bool:
+        return sender_id in self.owner_ids
+
     def commands(self) -> list[CommandRegistration]:
         unique: dict[str, CommandRegistration] = {}
         for registration in self._commands.values():

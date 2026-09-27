@@ -286,6 +286,31 @@ def test_unit_rate_limits_restarts() -> None:
     assert "StartLimitBurst" in text
 
 
+def test_unit_watches_liveness() -> None:
+    """A wedged process must be restarted, and the heartbeat is the only signal.
+
+    The heartbeat file existed with nothing reading it; the unit now uses
+    Type=notify with WatchdogSec, so ``start()`` has to send READY=1 and the
+    heartbeat loop has to ping or systemd will kill a healthy-looking bot.
+    """
+    text = unit_text()
+    assert "Type=notify" in text
+    assert "NotifyAccess=main" in text
+    assert "WatchdogSec=" in text
+    from userbot.app import HEARTBEAT_INTERVAL
+
+    match = re.search(r"^WatchdogSec=(\d+)$", text, re.M)
+    assert match, "WatchdogSec is not set"
+    seconds = int(match.group(1))
+    assert HEARTBEAT_INTERVAL * 2 <= seconds, (
+        f"the app pings every {HEARTBEAT_INTERVAL}s but WatchdogSec is {seconds}"
+    )
+    from userbot.notify import SystemdNotifier
+
+    for method in ("ready", "ping", "stopping", "reset"):
+        assert hasattr(SystemdNotifier, method), method
+
+
 def test_unit_bounds_resources() -> None:
     text = unit_text()
     assert "MemoryMax=" in text

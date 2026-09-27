@@ -292,6 +292,77 @@ def real_plugin_dir() -> Iterator[Path]:
         shutil.rmtree(target, ignore_errors=True)
 
 
+@pytest.fixture
+def app_settings(tmp_path: Path, plugin_root: Path) -> Settings:
+    return Settings(
+        root_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        plugin_dir=plugin_root,
+        log_dir=tmp_path / "data" / "logs",
+        api_id=1,
+        api_hash="test",
+    )
+
+
+# --- the application under test -------------------------------------------
+
+OWNER_ID = 42  # the id the stub gateway reports as the logged-in account
+
+
+class FakeMe:
+    def __init__(self) -> None:
+        self.id = OWNER_ID
+        self.username = "tester"
+
+
+class StubGateway:
+    """Stands in for ``TelegramGateway`` without touching the network."""
+
+    def __init__(self, settings: Settings, *, me: Any = None) -> None:
+        self.settings = settings
+        self.client = FakeClient()
+        self._me = FakeMe() if me is None else me
+        self.connected = False
+        self.disconnected = False
+        self.raise_on_connect: BaseException | None = None
+        self.hooks: list[Any] = []
+        self.catch_up_calls = 0
+
+    async def catch_up(self) -> None:
+        self.catch_up_calls += 1
+
+    async def connect(self) -> Any:
+        if self.raise_on_connect is not None:
+            raise self.raise_on_connect
+        self.connected = True
+        return self._me
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+        self.connected = False
+
+    def on_connection_state(self, hook: Any) -> None:
+        self.hooks.append(hook)
+
+    async def monitor_connection(self, interval: float = 5.0) -> None:
+        await asyncio.sleep(3600)
+
+    def emit(self, connected: bool) -> None:
+        for hook in self.hooks:
+            hook(connected=connected)
+
+
+def make_app(settings: Settings) -> tuple[Any, StubGateway]:
+    """Build a ``UserbotApp`` whose gateway is a stub."""
+    from userbot.app import UserbotApp
+
+    app = UserbotApp(settings)
+    gateway = StubGateway(settings)
+    app.gateway = gateway  # type: ignore[assignment]
+    app.manager.client = gateway.client
+    return app, gateway
+
+
 def load_shipped_plugin(name: str, generation: int = 1) -> Any:
     """Load a plugin straight from the repository's ``plugins/`` directory.
 

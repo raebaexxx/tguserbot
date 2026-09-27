@@ -20,6 +20,7 @@ from .health import HealthService
 from .loader import PluginLoadError
 from .logging import setup_logging
 from .manager import PluginManager
+from .notify import SystemdNotifier
 from .rate_limit import RateLimiter
 from .storage import Storage
 from .watcher import PluginWatcher
@@ -68,6 +69,7 @@ class UserbotApp:
         self._shutdown_lock = asyncio.Lock()
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._connection_task: asyncio.Task[None] | None = None
+        self.notifier = SystemdNotifier()
         self._started = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -102,6 +104,11 @@ class UserbotApp:
                 self.gateway.monitor_connection(), name="connection-monitor"
             )
             self._started = True
+            # Type=notify only counts the service as started once we say so.
+            self.notifier.ready(
+                f"connected as @{getattr(me, 'username', None) or getattr(me, 'id', '?')}"
+            )
+            self.notifier.reset()
             self.logger.info(
                 "Userbot started as @%s with %d active plugins",
                 getattr(me, "username", None) or getattr(me, "id", "unknown"),
@@ -120,6 +127,7 @@ class UserbotApp:
             # what used to leave a live context that nothing tracked.
             with contextlib.suppress(Exception):
                 await self.watcher.stop()
+            self.notifier.stopping("unloading plugins")
             self._stop_heartbeat()
             self._stop_connection_monitor()
             with contextlib.suppress(Exception):
@@ -168,13 +176,22 @@ class UserbotApp:
             self.health.mark_error("Telegram connection lost")
 
     async def _heartbeat_loop(self) -> None:
+        """Publish liveness: a timestamp file for monitoring, and sd_notify.
+
+        The systemd unit uses ``Type=notify`` with ``WatchdogSec``, so a wedged
+        process (a plugin deadlock, an event loop starved by a blocking call)
+        gets restarted instead of sitting there looking fine. The ping comes
+        from the same loop as the file so the two cannot disagree.
+        """
         path = self.settings.heartbeat_path
+        notify = SystemdNotifier()
         while True:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(str(int(time.time())), encoding="utf-8")
             except OSError as exc:
                 self.logger.debug("heartbeat write failed: %s", exc)
+            notify.ping()
             await asyncio.sleep(HEARTBEAT_INTERVAL)
 
     def _warn_about_world_readable_secrets(self) -> None:

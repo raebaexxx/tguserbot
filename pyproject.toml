@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tguserbot"
-version = "0.1.0"
+version = "0.2.0"
 description = "A modular Telegram userbot with a safe, reloadable plugin system"
 readme = "README.md"
 requires-python = ">=3.12"

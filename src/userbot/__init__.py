@@ -21,28 +21,33 @@ from .plugin_api import (
     validate_plugin_interface,
 )
 from .plugin_config import PluginConfig, PluginConfigError
+from .protocols import EventDispatcher, PluginHost, SupportsRespond, TelegramClientLike
 from .rate_limit import RateLimiter
 from .storage import PluginStorage, SandboxedSqlError, StorageError
 from .task_registry import TaskGroup
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "LIFECYCLE_HOOKS",
     "MAX_MESSAGE_LENGTH",
     "CommandContext",
+    "EventDispatcher",
     "HealthService",
     "Plugin",
     "PluginConfig",
     "PluginConfigError",
     "PluginContext",
     "PluginContractError",
+    "PluginHost",
     "PluginStorage",
     "RateLimiter",
     "SandboxedSqlError",
     "Settings",
     "StorageError",
+    "SupportsRespond",
     "TaskGroup",
+    "TelegramClientLike",
     "__version__",
     "validate_plugin_interface",
 ]

@@ -96,6 +96,12 @@ session. It receives the already configured client through `ctx.client`.
 | `ctx.register_handler(...)` | Raw Telethon event handler |
 | `ctx.is_owner(sender_id)` | Owner check |
 
+`ctx.client`, `ctx.dispatcher`, and `ctx.manager` are declared as `Protocol`s in
+`userbot.protocols`, not as `Any`, so a type checker verifies plugin code against
+the surface the core actually provides. `validate_plugin_interface` also rejects
+an entrypoint whose hooks are not coroutine functions, so a mismatch surfaces at
+load time with a clear message instead of mid-download.
+
 ## Storage
 
 `ctx.storage` is a `PluginStorage`: one SQLite file per plugin, under

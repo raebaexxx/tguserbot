@@ -8,7 +8,8 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=tguserbot
 Group=tguserbot
 WorkingDirectory=/opt/tguserbot
@@ -16,6 +17,11 @@ EnvironmentFile=/etc/tguserbot/userbot.env
 ExecStart=/opt/tguserbot/.venv/bin/python -m userbot run
 Restart=on-failure
 RestartSec=15
+# The app must call sd_notify at least every WatchdogSec/2 or systemd restarts it.
+# It does so from the same heartbeat that health monitoring reads, so the two
+# cannot drift apart. Set TGUSERBOT_WATCHDOG=0 to disable when running outside
+# systemd, where WATCHDOG_PID is unset and the notification is skipped anyway.
+WatchdogSec=60
 # The app bounds its own shutdown with one shared deadline (see
 # SHUTDOWN_TIMEOUT in userbot/app.py). This must stay above that value so the
 # process is never SIGKILLed mid-unload; the old 30s was below the worst case.

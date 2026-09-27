@@ -15,6 +15,7 @@ from userbot.commands import CommandDispatcher
 from userbot.config import Settings
 from userbot.health import MAX_TRACKED_ERRORS, HealthService, PluginError
 from userbot.logging import JsonFormatter, get_logger, setup_logging
+from userbot.manager import PluginManager
 from userbot.plugin_api import (
     LIFECYCLE_HOOKS,
     Plugin,
@@ -79,6 +80,55 @@ def test_validate_rejects_a_non_plugin_object() -> None:
 
     with pytest.raises(PluginContractError, match="setup"):
         validate_plugin_interface(NotAPlugin())
+
+
+def test_validate_rejects_a_synchronous_hook() -> None:
+    class Sync(GoodPlugin):
+        def start(self) -> None:  # type: ignore[override]
+            return None
+
+    with pytest.raises(PluginContractError, match="coroutine"):
+        validate_plugin_interface(Sync())
+
+
+# --- the protocols describe what the core actually provides ----------------
+
+
+def test_the_manager_implements_everything_a_plugin_may_call() -> None:
+    """A protocol only helps while the concrete class still satisfies it.
+
+    PluginContext declares its collaborators as protocols so mypy finally checks
+    plugin code; that is worthless if the core drifts away from the contract
+    without anyone noticing.
+    """
+    from userbot.protocols import EventDispatcher, TelegramClientLike
+
+    host_members = (
+        "active_count",
+        "active_names",
+        "get_runtime",
+        "has_plugin",
+        "is_disabled",
+        "error_count",
+    )
+    for member in host_members:
+        assert hasattr(PluginManager, member), f"PluginManager is missing {member}"
+    dispatcher_members = ("register", "unregister", "commands", "is_owner", "owner_ids")
+    dispatcher = CommandDispatcher({1})
+    for member in dispatcher_members:
+        assert hasattr(dispatcher, member), f"CommandDispatcher is missing {member}"
+    assert isinstance(dispatcher, EventDispatcher)
+    assert isinstance(FakeClient(), TelegramClientLike)
+
+
+def test_context_forwards_the_owner_check_to_the_dispatcher(tmp_path: Path) -> None:
+    """ctx.is_owner must go through the dispatcher, not duplicate the logic."""
+    context = build_context(tmp_path)
+    assert context.is_owner(1) is True
+    assert context.is_owner(2) is False
+    assert context.is_owner(None) is False
+    context.dispatcher.owner_ids.add(5)
+    assert context.is_owner(5) is True
 
 
 # --- plugin storage sandbox ------------------------------------------------
