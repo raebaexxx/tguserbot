@@ -33,8 +33,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
+import re
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -64,14 +66,33 @@ class GeminiError(RuntimeError):
 
 
 class QuotaExhausted(GeminiError):
-    """The model's allowance is spent, and waiting will not bring it back.
+    """The model is unavailable right now, and another one has to answer.
 
-    Separate from a rate limit, which shares the 429 and the
-    ``RESOURCE_EXHAUSTED`` status but clears in a minute. Gemini's own message is
-    the only thing that tells them apart, and guessing wrong costs four attempts
-    with backoff on a condition that is bound for midnight. Recoverable by using a
-    different model, not by retrying.
+    Separate from a rate limit worth waiting out, which shares the 429 and the
+    ``RESOURCE_EXHAUSTED`` status. Gemini's own message is the only thing that
+    tells them apart, and guessing wrong costs four attempts with backoff on a
+    condition that will not clear. Recoverable by using a different model, not by
+    retrying.
+
+    ``wait`` is the delay the API asked for, when it asked for one. It is
+    carried rather than re-parsed from the message because the two cases are
+    worth telling apart afterwards: a limit that clears in a minute is a
+    different thing from an allowance that is gone for the day, and saying
+    "quota exhausted" about the first sends the reader to a billing page that
+    will look normal.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        retryable: bool = False,
+        wait: float | None = None,
+    ) -> None:
+        super().__init__(message, status=status, retryable=retryable)
+        #: Seconds the API suggested, or None when it did not say.
+        self.wait = wait
 
 
 class MissingKeyError(GeminiError):
@@ -203,13 +224,58 @@ _QUOTA_MARKERS = (
 )
 
 
+#: How long a wait is worth sitting through before answering from another model.
+#:
+#: A Telegram command that pauses for a minute and a half gets cancelled, retried
+#: by the user, or forgotten. A pause of a second or two is invisible. Ten
+#: seconds is the point where waiting stops being cheaper than switching, which
+#: makes it a judgement call rather than a number with an obvious right answer --
+#: hence it being named and documented here instead of buried in a condition.
+SWITCH_AFTER_SECONDS = 10.0
+
+#: The clause that says how long for. Matched case-insensitively against the
+#: whole message, which is why the leading ``.lower()`` is not there.
+_RETRY_HINT = re.compile(r"please retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s", re.I)
+
+
+def _retry_hint_seconds(message: str) -> float | None:
+    """How long the API says to wait, if it says.
+
+    Worth reading carefully, because the headline is the same either way. Live,
+    the free tier's refusal read:
+
+        You exceeded your current quota, please check your plan and billing
+        details. ... Quota exceeded for metric:
+        generativelanguage.googleapis.com/generate_content_free_tier_requests,
+        limit: 20, model: gemini-3.8-flash
+        Please retry in 56.601092868s.
+
+    That is twenty requests per minute, not an allowance gone for the day. Read
+    only the headline, the honest answer becomes "your quota is spent, check
+    your billing" -- which sends the reader to a billing page that will show
+    nothing wrong.
+    """
+    match = _RETRY_HINT.search(message)
+    return float(match.group(1)) if match else None
+
+
 def _is_quota_exhausted(message: str) -> bool:
-    """Whether a 429 means "spent" rather than "slow down".
+    """Whether a 429 means "come back later" rather than "come back now".
 
     Both arrive as 429 with status ``RESOURCE_EXHAUSTED``, so the message is the
-    only signal. A rate limit says "Resource has been exhausted (e.g. check
-    quota)" and clears on its own; a spent quota mentions the plan and does not.
+    only signal, and the message is ambiguous. A model that is merely busy
+    says ``Resource has been exhausted (e.g. check quota)``; the free tier's
+    per-request cap says ``exceeded your current quota ... check your plan and
+    billing``, which is the same sentence whether it clears in a minute or at
+    midnight.
+
+    The discriminator is the retry hint, so it decides: a wait under
+    ``SWITCH_AFTER_SECONDS`` is worth sitting through, and anything longer -- or
+    no hint at all -- is not.
     """
+    wait = _retry_hint_seconds(message)
+    if wait is not None and wait <= SWITCH_AFTER_SECONDS:
+        return False
     lowered = message.lower()
     if "resource has been exhausted" in lowered:
         # The generic form. Only the explicit forms below are conclusive.
@@ -291,11 +357,15 @@ class GeminiClient:
         # Scrub here, where the keys are in scope. The classifier is static and
         # knows nothing about them, so an error body that echoed the key would
         # otherwise travel straight into a Telegram reply.
-        return type(error)(
-            _redact(str(error), self._keys),
-            status=error.status,
-            retryable=error.retryable,
-        )
+        scrubbed = _redact(str(error), self._keys)
+        if isinstance(error, QuotaExhausted):
+            # The wait rides along; rebuilding the exception by type alone would
+            # quietly drop it, and it is the difference between the two wordings
+            # the user sees.
+            return QuotaExhausted(
+                scrubbed, status=error.status, retryable=error.retryable, wait=error.wait
+            )
+        return type(error)(scrubbed, status=error.status, retryable=error.retryable)
 
     @staticmethod
     def _describe_error(status: int, payload: dict[str, Any]) -> GeminiError:
@@ -312,7 +382,12 @@ class GeminiClient:
         if not detail:
             detail = "запрос отклонён"
         if status == 429 and _is_quota_exhausted(detail):
-            return QuotaExhausted(f"Gemini: {detail}", status=status, retryable=False)
+            return QuotaExhausted(
+                f"Gemini: {detail}",
+                status=status,
+                retryable=False,
+                wait=_retry_hint_seconds(detail),
+            )
         return GeminiError(f"Gemini: {detail}", status=status, retryable=status in RETRY_STATUS)
 
     async def _request(
@@ -603,6 +678,10 @@ class ModelRouter:
         self._owns_client = client is None
         self._active: str | None = None
         self._exhausted: set[str] = set()
+        #: How long each refused model asked us to wait, when it said. The
+        #: difference between "try again in a minute" and "come back tomorrow",
+        #: and the two deserve different words in the reply.
+        self._waits: dict[str, float] = {}
 
     # -- state ------------------------------------------------------------
 
@@ -629,15 +708,29 @@ class ModelRouter:
         return self._active is not None and self._active != self.models[0]
 
     def notice(self) -> str:
-        """A line for the user, only when something is worth saying."""
+        """A line for the user, only when something is worth saying.
+
+        Says which of the two things happened, and how long the API asked for,
+        because on the free tier it is almost always the per-request cap --
+        twenty requests a minute -- and telling someone their quota is spent when
+        it resets in under a minute sends them to a billing page that will look
+        perfectly normal.
+        """
         if not self.degraded:
             return ""
-        return f"Модель {self.models[0]} недоступна (квота исчерпана), отвечает {self._active}."
+        wait = self._waits.get(self.models[0])
+        if wait is None:
+            return f"Квота модели {self.models[0]} исчерпана, отвечает {self._active}."
+        return (
+            f"Лимит запросов к {self.models[0]} исчерпан "
+            f"(повтор через ~{math.ceil(wait)} с), отвечает {self._active}."
+        )
 
     def reset(self) -> None:
         """Forget what was learned, so the chain probes from the top again."""
         self._active = None
         self._exhausted.clear()
+        self._waits.clear()
 
     def _ordered(self) -> list[str]:
         """The remembered model first, then the rest in configured order."""
@@ -677,6 +770,8 @@ class ModelRouter:
                 reply = await client.generate(turns, model=model, **kwargs)
             except QuotaExhausted as exc:
                 self._exhausted.add(model)
+                if exc.wait is not None:
+                    self._waits[model] = exc.wait
                 if model == self._active:
                     self._active = None
                 logger.warning("Gemini model %s is out of quota: %s", model, exc)
@@ -711,6 +806,8 @@ class ModelRouter:
                     logger.warning("Gemini model %s ran out of quota mid-stream: %s", model, exc)
                     raise
                 self._exhausted.add(model)
+                if exc.wait is not None:
+                    self._waits[model] = exc.wait
                 if model == self._active:
                     self._active = None
                 logger.warning("Gemini model %s is out of quota: %s", model, exc)

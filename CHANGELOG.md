@@ -24,22 +24,31 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   read-only.
 - `PluginConfig.float_value`, for settings that are not whole numbers.
 - `ModelRouter`: tries models in order and remembers the one that answered.
-  The free tier's daily allowance is counted per model, so one configured model
-  is not a fallback — when its quota runs out the only thing left to do is fail.
-  That is not hypothetical: the quota on the configured default was spent, and
-  every question after it produced an error until a second model was tried.
+  A model's allowance is counted per model, so one configured model is not a
+  fallback — when it runs out the only thing left to do is fail. That is not
+  hypothetical: the configured default was being refused, and every question
+  after it produced an error until a second model was tried.
 - `model_fallbacks` in the `ai` and `sum` manifests. When a fallback answers, the
   plugin says so under the reply, and stays silent when the configured model was
-  the one that worked. When every model's quota is gone, the error names them.
+  the one that worked. When every model is refused, the error names them.
 
 ### Fixed
 
 - **A spent quota was retried four times with backoff.** `429` was classified as
-  retryable, so a condition that cannot recover before midnight was given four
-  attempts, and the real answer was delayed by a minute to arrive as an error.
-  `QuotaExhausted` is now separate from a rate limit, which shares the status and
-  the `RESOURCE_EXHAUSTED` code and does clear in a minute. The API's own message
-  is the only thing that tells them apart, so that is what it keys on.
+  retryable, so a condition that cannot recover was given four attempts and the
+  real answer was delayed to arrive as an error. `QuotaExhausted` is now separate
+  from a rate limit worth waiting out, which shares the status and the
+  `RESOURCE_EXHAUSTED` code.
+- **"Quota exhausted" was the wrong thing to tell the user.** The live refusal
+  reads `You exceeded your current quota, please check your plan and billing
+  details` and then, underneath, `Quota exceeded for metric:
+  generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20
+  ... Please retry in 56.601092868s`. That is twenty requests a minute, not a
+  daily allowance. The headline is identical in both cases, so the retry hint is
+  what decides: under `SWITCH_AFTER_SECONDS` (10s, a judgement call and documented
+  as one) the plugin waits, above it it moves to the next model. The wait rides
+  along on the exception so the reply can say "try again in a minute" rather than
+  sending the reader to a billing page that will look normal.
 - **`/ub ai` was broken by the change that was meant to fix it.** The plugins
   passed `model=` to the router, which binds `model` itself for each attempt, so
   every chat and every generation raised `TypeError: got multiple values for

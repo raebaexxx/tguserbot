@@ -299,3 +299,136 @@ def test_the_default_is_the_clients_own_default() -> None:
     """Not a second copy of 120 to drift out of step with the client."""
     router = gemini.ModelRouter(["a"], key_getter=lambda: [KEY])
     assert router._get_client().timeout == gemini.GeminiClient(api_keys=[KEY]).timeout
+
+
+# --- the live message says more than the headline ---------------------------
+
+
+#: Captured verbatim from the running service on the day of this change. The
+#: headline is the one the classifier keyed on, and the second half is the part
+#: that says how long for.
+FREE_TIER_PER_MINUTE = {
+    "error": {
+        "code": 429,
+        "message": (
+            "You exceeded your current quota, please check your plan and billing "
+            "details. For more information on this error, head to: "
+            "https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your "
+            "current usage, head to: https://ai.dev/rate-limit. \n"
+            "Quota exceeded for metric: generativelanguage.googleapis.com/"
+            "generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\n"
+            "Please retry in 56.601092868s."
+        ),
+        "status": "RESOURCE_EXHAUSTED",
+    }
+}
+
+
+def test_the_retry_hint_is_read() -> None:
+    """``Please retry in 56.6s`` is the only thing separating the two cases.
+
+    The headline -- "exceeded your current quota, check your plan and billing" --
+    is identical for a limit that clears in under a minute and for one that is
+    gone until the daily reset. Reading only the headline calls a per-minute
+    cap a spent allowance, and then tells the user to expect nothing until
+    midnight.
+    """
+    message = str(FREE_TIER_PER_MINUTE["error"]["message"])
+    assert gemini._retry_hint_seconds(message) == pytest.approx(56.6, abs=0.01)
+
+
+def test_a_minute_long_wait_moves_the_chain_but_is_not_called_a_quota() -> None:
+    """Both halves of the live message matter, and they point different ways.
+
+    56 seconds is too long to sit inside a command, so the chain moves. But the
+    allowance is not gone, and the wait rides along on the exception precisely so
+    the reply can say "try again in a minute" instead of "check your billing".
+    """
+    error = gemini.GeminiClient._describe_error(429, FREE_TIER_PER_MINUTE)
+    assert isinstance(error, gemini.QuotaExhausted), "a 56 second wait should not stall the command"
+    assert error.retryable is False
+    assert error.wait == pytest.approx(56.6, abs=0.01), (
+        "the wait is lost, so the user gets told the wrong thing"
+    )
+
+
+def test_the_wait_survives_key_redaction() -> None:
+    """``_describe`` rebuilds the exception to scrub the key, and must keep it.
+
+    Rebuilding by type alone is the obvious way to write that, and it drops
+    every extra field -- which here is the only thing distinguishing a per-minute
+    cap from a spent allowance.
+    """
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(429, json=FREE_TIER_PER_MINUTE))
+    )
+    client = gemini.GeminiClient(api_keys=[KEY], client=http)
+    error = client._describe(httpx.Response(429, json=FREE_TIER_PER_MINUTE))
+    assert isinstance(error, gemini.QuotaExhausted)
+    assert error.wait == pytest.approx(56.6, abs=0.01), error.wait
+
+
+def test_a_limit_clearing_immediately_stays_put() -> None:
+    """Waiting two seconds is cheaper than answering from a different model."""
+    body = {
+        "error": {
+            "code": 429,
+            "message": (
+                "Resource has been exhausted (e.g. check quota). "
+                "Quota exceeded for metric: generate_content_free_tier_requests, "
+                "limit: 20, model: gemini-3.8-flash\nPlease retry in 1.4s."
+            ),
+        }
+    }
+    error = gemini.GeminiClient._describe_error(429, body)
+    assert not isinstance(error, gemini.QuotaExhausted)
+    assert error.retryable is True
+
+
+def test_a_long_wait_does_move_the_chain_on() -> None:
+    """Nobody wants a command that sits there for a minute and a half."""
+    body = {
+        "error": {
+            "code": 429,
+            "message": "Quota exceeded for metric: x, limit: 20. Please retry in 900s.",
+        }
+    }
+    assert isinstance(gemini.GeminiClient._describe_error(429, body), gemini.QuotaExhausted)
+
+
+def test_the_switch_threshold_is_a_documented_choice() -> None:
+    """Not a magic number: the trade-off is spelled out where it is set."""
+    assert 0 < gemini.SWITCH_AFTER_SECONDS <= 30
+    assert isinstance(gemini.SWITCH_AFTER_SECONDS, float)
+
+
+def test_the_notice_says_what_actually_happened() -> None:
+    """ "квота исчерпана" on a per-minute cap sends people to check billing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.split("/models/")[1].split(":")[0] == "a":
+            return httpx.Response(429, json=FREE_TIER_PER_MINUTE)
+        return ok()(request)
+
+    chain = gemini.ModelRouter(["a", "b"], client=build(gemini, handler)[0])
+    asyncio.run(chain.generate([gemini.Turn("user", [gemini.Part("x")])]))
+
+    assert chain.active == "b"
+    notice = chain.notice()
+    assert "b" in notice, notice
+    assert "квот" not in notice.lower(), (
+        f"a per-minute limit is not an exhausted allowance: {notice!r}"
+    )
+
+
+def test_a_genuinely_spent_allowance_does_say_so() -> None:
+    """The honest case keeps the honest wording."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.split("/models/")[1].split(":")[0] == "a":
+            return quota(request)
+        return ok()(request)
+
+    chain = gemini.ModelRouter(["a", "b"], client=build(gemini, handler)[0])
+    asyncio.run(chain.generate([gemini.Turn("user", [gemini.Part("x")])]))
+    assert "квот" in chain.notice().lower(), chain.notice()

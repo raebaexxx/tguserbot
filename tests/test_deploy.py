@@ -573,12 +573,11 @@ def test_update_stops_the_service_before_pulling() -> None:
     """
     body = _update_code_body()
     stop = body.find("systemctl_cmd stop")
-    pull = body.find("git -C \"${APP_DIR}\" pull --ff-only")
+    pull = body.find('git -C "${APP_DIR}" pull --ff-only')
     assert stop != -1, "update never stops the service before changing the tree"
     assert pull != -1, "update no longer pulls"
     assert stop < pull, (
-        "the pull must come after the stop, or the running process sees a "
-        "partially updated tree"
+        "the pull must come after the stop, or the running process sees a partially updated tree"
     )
 
 
@@ -624,6 +623,6 @@ def test_rollback_brings_the_service_back_up() -> None:
     """The helper is the recovery, so it has to start something."""
     text = CTL.read_text(encoding="utf-8")
     start = text.index("rollback_and_start() {")
-    helper = text[start:text.index("\n}", start)]
+    helper = text[start : text.index("\n}", start)]
     assert "systemctl_cmd start" in helper or "systemctl_cmd restart" in helper, helper
     assert "git" in helper, "the half-updated tree has to be put back"
