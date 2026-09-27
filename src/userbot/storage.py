@@ -12,6 +12,10 @@ from typing import Any
 #: Statements a sandboxed plugin must never run. ``ATTACH`` is the important
 #: one: with it a plugin could attach the core bookkeeping database and drop
 #: ``plugin_state`` from the outside.
+#:
+#: This is a cheap pre-check, not the boundary. It has to be, because it is what
+#: produces an error a plugin author can read, and the boundary itself is the
+#: authoriser installed on the connection -- see :func:`_sandbox_authorizer`.
 FORBIDDEN_SQL = re.compile(
     r"^\s*(attach|detach|pragma|vacuum)\b",
     re.IGNORECASE,
@@ -36,21 +40,93 @@ class SandboxedSqlError(StorageError):
     pass
 
 
+def strip_sql_comments(sql: str) -> str:
+    """Remove comments, so a pre-check sees the statement SQLite would run.
+
+    ``FORBIDDEN_SQL`` is anchored with ``^\\s*``, and ``\\s`` matches neither
+    ``-`` nor ``/``, so ``-- x\\nATTACH DATABASE ...`` passed it while SQLite
+    parsed the comment away and executed the attach. Verified before the fix:
+    a plugin could attach the core database and write to ``plugin_state``
+    through a payload that began with a comment.
+
+    String literals are respected, because a ``'-- not a comment'`` in a query is
+    a value and not a comment to be swallowed.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(sql)
+    quote: str | None = None
+    while index < length:
+        char = sql[index]
+        if quote is not None:
+            out.append(char)
+            if char == quote:
+                # A doubled quote is an escaped quote, not the end of the string.
+                if index + 1 < length and sql[index + 1] == quote:
+                    out.append(sql[index + 1])
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if char == "-" and sql.startswith("--", index):
+            newline = sql.find("\n", index)
+            index = length if newline == -1 else newline
+            continue
+        if char == "/" and sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            index = length if end == -1 else end + 2
+            out.append(" ")
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+#: What a plugin's connection refuses outright. These are SQLite's own action
+#: codes, asked at parse time on the statement the engine actually built, so
+#: there is no spelling of ``ATTACH`` that reaches them and no comment that
+#: hides one.
+_DENIED_SQLITE_ACTIONS = frozenset(
+    {
+        sqlite3.SQLITE_ATTACH,
+        sqlite3.SQLITE_DETACH,
+        sqlite3.SQLITE_PRAGMA,
+    }
+)
+
+
+def _sandbox_authorizer(action: int, arg1: Any, arg2: Any, db_name: Any, trigger: Any) -> int:
+    """The actual boundary. Returns DENY for anything that leaves the file."""
+    if action in _DENIED_SQLITE_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
 def guard_sandbox_sql(sql: str) -> None:
     """Reject statements that could escape a plugin's own database file."""
-    if FORBIDDEN_SQL.match(sql):
-        raise SandboxedSqlError(
-            f"statement is not allowed inside a plugin database: {sql.strip().split()[0]!r}"
-        )
-    if STACKED_STATEMENT.search(sql.rstrip().rstrip(";")):
+    statement = strip_sql_comments(sql).lstrip("﻿ \t\r\n")
+    if FORBIDDEN_SQL.match(statement):
+        head = statement.split(None, 1)[0] if statement.split() else "?"
+        raise SandboxedSqlError(f"statement is not allowed inside a plugin database: {head!r}")
+    if STACKED_STATEMENT.search(statement.rstrip().rstrip(";")):
         raise SandboxedSqlError("only a single SQL statement is allowed")
 
 
 class _SqliteGateway:
     """One serialized SQLite connection, driven from asyncio via a thread pool."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, sandboxed: bool = False) -> None:
         self.path = path
+        #: A plugin's connection is fenced in by SQLite itself; the core one is
+        #: not, because the core legitimately runs PRAGMA and ATTACH-free
+        #: migrations.
+        self.sandboxed = sandboxed
         self._connection: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
 
@@ -70,12 +146,37 @@ class _SqliteGateway:
             "PRAGMA busy_timeout=5000",
         ):
             await self._run(partial(self._require_connection().execute, statement))
+        # `migrate` reads PRAGMA table_info, so the fence goes after it: the
+        # authoriser refuses PRAGMA, and these are our own statements, run before
+        # any plugin holds this connection.
         await self.migrate()
+        if self.sandboxed:
+            self._fence()
 
     def _open(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, check_same_thread=False, timeout=5.0)
         connection.row_factory = sqlite3.Row
+        if self.sandboxed:
+            # And the other way out of a file-only sandbox: a shared library
+            # loaded into the process. Off unless asked for, and never asked for
+            # here.
+            connection.enable_load_extension(False)
         return connection
+
+    def _fence(self) -> None:
+        """Put the sandbox in place, once our own setup statements are done.
+
+        ``guard_sandbox_sql`` reads the text of a statement; the authoriser runs
+        inside the engine on the parsed one, so no comment, alias or amount of
+        whitespace gets past it. The text check stays because it produces an
+        error a plugin author can act on.
+
+        Installed after the PRAGMAs in :meth:`initialize` rather than at connect
+        time, because those are ours and the authoriser refuses PRAGMA. The window
+        is the length of this method, on a connection no plugin has been handed
+        yet.
+        """
+        self._require_connection().set_authorizer(_sandbox_authorizer)
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:
@@ -367,7 +468,7 @@ class PluginStorage:
     """
 
     def __init__(self, path: Path, plugin_name: str) -> None:
-        self._gateway = _SqliteGateway(path)
+        self._gateway = _SqliteGateway(path, sandboxed=True)
         self.plugin_name = plugin_name
         self.path = path
 

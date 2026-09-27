@@ -128,6 +128,9 @@ _DANGEROUS_ATTRIBUTES = {
     "__init_subclass__": "перехват создания класса",
     "f_globals": "обход области видимости",
     "f_locals": "доступ к локальным переменным",
+    "__dict__": "обход через словарь модуля или объекта",
+    "__getattr__": "перехват доступа к атрибутам",
+    "__mro__": "обход через иерархию классов",
 }
 
 #: ``os`` members that execute or destroy.
@@ -177,6 +180,33 @@ _DANGEROUS_METHODS = {
 }
 
 
+def _joined_constants(node: ast.AST) -> str:
+    """Every constant string fragment in a ``+`` chain, concatenated.
+
+    Not a full evaluation: a non-constant operand is skipped rather than making
+    the whole expression unknown. That is deliberate for this one check. In
+    ``d + '/ses' + 'sion.session'`` the fragments join to ``/session.session``,
+    which is the file. Bailing out on the first unknown operand handed the whole
+    thing back, and a path split in two is precisely what someone writes after
+    reading a denylist.
+
+    The cost is a possible false positive on a sentence that happens to end in
+    those characters, which is one line for the owner to look at. The cost of
+    missing the session file is the Telegram account.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value
+            for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _joined_constants(node.left) + _joined_constants(node.right)
+    return ""
+
+
 def _dotted(node: ast.AST) -> str:
     """Render ``a.b.c`` from nested attribute/name nodes, else empty."""
     parts: list[str] = []
@@ -195,6 +225,14 @@ class _Reviewer(ast.NodeVisitor):
         self.path = path
         self.findings: list[Finding] = []
         self.imported: set[str] = set()
+        #: Local name -> the dotted path it really refers to.
+        #:
+        #: ``import os as o`` binds ``o``, so ``o.system(...)`` is a shell
+        #: execution that reads as a call on an unknown name. ``visit_Call``
+        #: matched a literal ``os`` head, and one word of renaming was enough to
+        #: walk past the whole list. ``_check_module`` already took the qualified
+        #: name for this and never read it.
+        self.aliases: dict[str, str] = {}
 
     def _add(self, node: ast.AST, severity: str, reason: str) -> None:
         self.findings.append(
@@ -208,6 +246,8 @@ class _Reviewer(ast.NodeVisitor):
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             self.imported.add(alias.name)
+            bound = alias.asname or alias.name.split(".")[0]
+            self.aliases[bound] = alias.asname and alias.name or alias.name.split(".")[0]
             self._check_module(node, alias.name, alias.asname or alias.name)
         self.generic_visit(node)
 
@@ -220,51 +260,88 @@ class _Reviewer(ast.NodeVisitor):
         self.imported.add(module)
         for alias in node.names:
             if module:
-                self._check_module(node, module, f"{module}.{alias.name}")
+                qualified = f"{module}.{alias.name}"
+                # `from os import system as run` binds `run` to `os.system`.
+                self.aliases[alias.asname or alias.name] = qualified
+                self._check_module(node, module, qualified)
             else:
+                self.aliases[alias.asname or alias.name] = alias.name
                 self._check_module(node, alias.name, alias.name)
         self.generic_visit(node)
 
     def _check_module(self, node: ast.AST, module: str, _qualified: str) -> None:
-        if module in _DANGEROUS_MODULES:
-            self._add(node, "high", f"импорт {module!r} — {_DANGEROUS_MODULES[module]}")
+        # Matched on the package root, not the exact spelling. `import
+        # importlib.machinery` binds `importlib`; `import ctypes.util` binds
+        # `ctypes`, so `ctypes.CDLL(...)` works after it. An exact match refused
+        # one name out of a package and waved the rest through.
+        root = module.split(".")[0]
+        if module in _DANGEROUS_MODULES or root in _DANGEROUS_MODULES:
+            self._add(
+                node,
+                "high",
+                f"импорт {module!r} — {_DANGEROUS_MODULES.get(module) or _DANGEROUS_MODULES[root]}",
+            )
             return
-        if module in _NETWORK_MODULES or module.split(".")[0] in _NETWORK_MODULES:
+        if module in _NETWORK_MODULES or root in _NETWORK_MODULES:
             # Blocking, not a warning: direct network access is the realistic way
             # for a generated plugin to exfiltrate whatever the bot can read. An
             # owner who genuinely needs it can delete the line during review.
             self._add(node, "high", f"импорт {module!r} — прямой сетевой доступ в обход ядра")
 
+    def _resolve(self, target: str) -> str:
+        """Map a written name onto the one it was imported as.
+
+        ``o.system`` becomes ``os.system`` when ``o`` was bound by
+        ``import os as o``, which is the difference between a report that is
+        right and one that is reassuring.
+        """
+        head, _, tail = target.rpartition(".")
+        if not head:
+            return self.aliases.get(target, target)
+        resolved = self._resolve(head)
+        return f"{resolved}.{tail}" if resolved else target
+
     # -- calls and attributes --------------------------------------------
 
     def visit_Call(self, node: ast.Call) -> None:
-        target = _dotted(node.func)
+        written = _dotted(node.func)
+        # What the name means, not how it was spelled. Everything below matches
+        # on the resolved form, so a renamed import is judged as the thing it is.
+        target = self._resolve(written) if written else ""
         if target:
             head, _, tail = target.rpartition(".")
             if head in {"os", "os.path"} and tail in _DANGEROUS_OS:
-                self._add(node, "high", f"{target}() — {_DANGEROUS_OS[tail]}")
-            elif head == "os" and tail in _DANGEROUS_OS:
-                self._add(node, "high", f"{target}() — {_DANGEROUS_OS[tail]}")
+                self._add(node, "high", f"{written}() — {_DANGEROUS_OS[tail]}")
             elif head in {"subprocess", "pty"}:
                 self._add(
-                    node, "high", f"{target}() — {_DANGEROUS_OS.get(tail, 'запуск процесса')}"
+                    node,
+                    "high",
+                    f"{written}() — {_DANGEROUS_OS.get(tail, 'запуск процесса')}",
                 )
+            elif head == "builtins" and tail in _DANGEROUS_BUILTINS:
+                # `import builtins` gives the same reach as the bare name, and
+                # was on no list at all.
+                self._add(node, "high", f"{written}() — {_DANGEROUS_BUILTINS[tail]}")
         if isinstance(node.func, ast.Name) and node.func.id in _DANGEROUS_BUILTINS:
             self._add(node, "high", f"{node.func.id}() — {_DANGEROUS_BUILTINS[node.func.id]}")
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr in _NETWORK_CALLS
-            and _dotted(node.func).startswith("asyncio.")
+            and target.startswith("asyncio.")
         ):
             # asyncio itself is used by every async plugin and stays clean;
             # opening a raw socket through it does not.
-            self._add(node, "high", f"{target}() — прямой сетевой доступ в обход ядра")
+            self._add(node, "high", f"{written}() — прямой сетевой доступ в обход ядра")
         elif isinstance(node.func, ast.Attribute) and node.func.attr in _DANGEROUS_METHODS:
             reason = _DANGEROUS_METHODS[node.func.attr]
             # shutil.rmtree and friends are the common case; client.disconnect is
             # a real hazard because it drops the session out from under the bot.
             severity = "high" if node.func.attr in {"rmtree", "unlink", "rmdir"} else "medium"
-            self._add(node, severity, f"{node.func.attr}() — {reason}")
+            # `written` is empty for `Path('/x').unlink()`, where the receiver is
+            # a call rather than a name. The method name is what identifies the
+            # finding, so fall back to it rather than reporting "() — удаление".
+            name = written or node.func.attr
+            self._add(node, severity, f"{name}() — {reason}")
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -280,6 +357,24 @@ class _Reviewer(ast.NodeVisitor):
                 "high",
                 f"обращение к файлу сессии Telegram: {node.value!r}",
             )
+        self.generic_visit(node)
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        """Concatenated string literals are still one string.
+
+        The constant check only saw a literal ending in ``session.session``, and
+        ``open(d + '/ses' + 'sion.session')`` puts the same path together at
+        runtime. Splitting a path is what someone does when they have read a
+        denylist, which is exactly the moment the report needs to be right.
+        """
+        if isinstance(node.op, ast.Add):
+            folded = _joined_constants(node)
+            if folded.endswith("session.session"):
+                self._add(
+                    node,
+                    "high",
+                    f"обращение к файлу сессии Telegram: {folded!r}",
+                )
         self.generic_visit(node)
 
 

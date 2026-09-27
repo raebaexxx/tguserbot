@@ -21,7 +21,11 @@ What the plugin sandbox does and does not cover:
 - **Isolated:** each plugin's data lives in its own SQLite file, so a plugin
   cannot read or destroy the core bookkeeping tables or another plugin's
   tables, and cannot stall the manager's storage lock. `ATTACH`, `PRAGMA`,
-  `VACUUM`, and stacked SQL statements are refused.
+  `VACUUM`, and stacked SQL statements are refused — twice over. The statement
+  text is checked for the forbidden keywords, and the connection carries a SQLite
+  authoriser that denies those operations on the *parsed* statement, so a payload
+  hidden behind a comment is refused by the engine rather than by the text.
+  Loading a shared library into the process is disabled on the same connection.
 - **Not isolated:** the Telegram client, the session file, the process
   environment, the filesystem outside the data directory, and anything reachable
   over the network. A malicious plugin can do all of that.

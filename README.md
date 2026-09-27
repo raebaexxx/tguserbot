@@ -242,9 +242,11 @@ area (by `/ub ai new`, see below). Generation only ever writes to
 `<data_dir>/plugin-staging/`, which is not a plugin root, so nothing it produced
 can run until you type this command. Adoption runs a static review of the code
 first and refuses anything that reaches for a shell, a socket, a native library,
-or the session file; anything else it flags is shown alongside the result. The
-review is a denylist, not a sandbox — treat adopted code as trusted, because you
-just approved it.
+or the session file — including through a renamed import (`import os as o`),
+through `builtins`, through a submodule of a refused package, and through a
+session path assembled from pieces. Anything else it flags is shown alongside the
+result. The review is a denylist, not a sandbox — treat adopted code as trusted,
+because you just approved it.
 
 **Note on the systemd deployment:** the shipped unit sets `ProtectSystem=strict`,
 which makes `/opt/tguserbot/plugins` read-only, so the watcher cannot fire there.
