@@ -275,23 +275,38 @@ health_check() {
 }
 
 rollback_and_start() {
-  # Every failure path out of update_code has to leave a running bot. The tree
-  # may be half-updated -- git pull writes files one at a time -- so going back
-  # to the commit we came from is the only state known to work.
+  # Every failure path out of update_code has to leave a running bot, on the code
+  # that worked. The tree may be half-updated -- git pull writes files one at a
+  # time -- so going back to the commit we came from is the only state known to
+  # work.
+  #
+  # `restart`, not `start`: `systemctl start` on an already-active unit succeeds
+  # and does nothing, so on the health-check path it would leave running exactly
+  # the build that just failed its own health check.
   local previous="${1:-}"
+  local branch="${2:-}"
   if [ -n "${previous}" ]; then
-    echo "Rolling back to ${previous}." >&2
-    run_as_service_user git -C "${APP_DIR}" checkout --quiet "${previous}" || true
-    run_as_service_user "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}" || true
+    if [ -n "${branch}" ] && [ "${branch}" != "HEAD" ]; then
+      # Return to the branch and move it, rather than checking the commit out.
+      # `git checkout <sha>` detaches HEAD, and `git pull` in a detached HEAD
+      # fails with "You are not currently on a branch" — so one rollback used to
+      # break the update path until a human typed `git checkout main` by hand.
+      git -C "${APP_DIR}" checkout --quiet "${branch}" 2>/dev/null || true
+      git -C "${APP_DIR}" reset --hard --quiet "${previous}" 2>/dev/null || true
+    else
+      git -C "${APP_DIR}" reset --hard --quiet "${previous}" 2>/dev/null || true
+    fi
+    "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}" 2>/dev/null || true
   fi
-  systemctl_cmd start "${SERVICE_NAME}" || systemctl_cmd restart "${SERVICE_NAME}" || true
+  systemctl_cmd restart "${SERVICE_NAME}" || systemctl_cmd start "${SERVICE_NAME}" || true
 }
 
 update_code() {
   if is_system_mode; then
     require_root_for_system update
-    local previous
+    local previous branch
     previous="$(git -C "${APP_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    branch="$(git -C "${APP_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
     # Stop first, then pull. The plugin watcher is on by default, so a pull with
     # the service live looks like a plugin edit: the running process still holds
     # the old modules in memory while the new sources on disk import from them,
@@ -303,20 +318,24 @@ update_code() {
     # every step below is checked and recovers.
     systemctl_cmd stop "${SERVICE_NAME}" || true
     chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.venv" 2>/dev/null || true
-    if ! run_as_service_user git -C "${APP_DIR}" pull --ff-only; then
+    # git runs as root, the same as install.sh does. It has to write inside
+    # .git/FETCH_HEAD and create .git/index.lock, and .git is root-owned on
+    # purpose: the service user must not be able to rewrite the code that the
+    # next update installs. Run as the service user, the pull failed every time
+    # with "detected dubious ownership in repository at /opt/tguserbot".
+    if ! git -C "${APP_DIR}" pull --ff-only; then
       echo "Pull failed; restoring ${previous} and starting the service." >&2
-      rollback_and_start "${previous}"
+      rollback_and_start "${previous}" "${branch}"
       exit 1
     fi
-    if ! run_as_service_user "${PYTHON}" -m pip install \
-      --require-hashes -r "${APP_DIR}/requirements.lock"; then
+    if ! "${PYTHON}" -m pip install --require-hashes -r "${APP_DIR}/requirements.lock"; then
       echo "Dependency install failed; rolling back to ${previous}." >&2
-      rollback_and_start "${previous}"
+      rollback_and_start "${previous}" "${branch}"
       exit 1
     fi
-    if ! run_as_service_user "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}"; then
+    if ! "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}"; then
       echo "Install failed; rolling back to ${previous}." >&2
-      rollback_and_start "${previous}"
+      rollback_and_start "${previous}" "${branch}"
       exit 1
     fi
     if systemctl_cmd start "${SERVICE_NAME}"; then
@@ -325,12 +344,12 @@ update_code() {
         echo "Updated to $(git -C "${APP_DIR}" rev-parse --short HEAD); service is healthy."
       else
         echo "Health check failed after updating to $(git -C "${APP_DIR}" rev-parse --short HEAD)." >&2
-        rollback_and_start "${previous}"
+        rollback_and_start "${previous}" "${branch}"
         exit 1
       fi
     else
       echo "Start failed; rolling back to ${previous}." >&2
-      rollback_and_start "${previous}"
+      rollback_and_start "${previous}" "${branch}"
       exit 1
     fi
   else

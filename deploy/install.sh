@@ -40,7 +40,13 @@ ensure_service_user() {
 }
 
 ensure_directories() {
-  install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 700 "${APP_DIR}" "${DATA_DIR}"
+  # The checkout stays root-owned; only the venv and the runtime data belong to
+  # the service user. Handing the service user write access to its own code let a
+  # compromised bot rewrite userbotctl -- which /usr/local/bin/tguserbotctl
+  # symlinks to, and which the operator then runs under sudo -- and break the
+  # next `git pull --ff-only`.
+  install -d -o root -g root -m 755 "${APP_DIR}"
+  install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 700 "${DATA_DIR}"
   install -d -o root -g "${SERVICE_USER}" -m 750 "${CONFIG_DIR}"
   install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 700 "${DATA_DIR}/logs"
 }

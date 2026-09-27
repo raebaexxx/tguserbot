@@ -555,6 +555,13 @@ def _update_code_body() -> str:
     return text[start:end]
 
 
+def _rollback_body() -> str:
+    """The body of ``rollback_and_start``, which is where the recovery lives."""
+    text = CTL.read_text(encoding="utf-8")
+    start = text.index("rollback_and_start() {")
+    return text[start : text.index("\n}", start)]
+
+
 def test_update_stops_the_service_before_pulling() -> None:
     """A live process must not see a half-updated tree.
 
@@ -609,11 +616,14 @@ def test_a_failing_pull_does_not_leave_the_bot_stopped() -> None:
     result and comes back.
     """
     body = _update_code_body()
-    # No bare `run_as_service_user git ... pull` left to trip set -e.
-    assert not re.search(r"^\s*run_as_service_user git .*pull", body, re.M), (
+    # Only the system branch matters: there is no service to leave stopped in the
+    # developer path, so an unguarded pull there is fine.
+    system_branch = body[: body.index("\n  else")]
+    # A bare git call would trip set -e and exit with the bot stopped.
+    assert not re.search(r"^\s*git -C .*pull", system_branch, re.M), (
         "the pull is still unguarded; a failure would exit with the bot stopped"
     )
-    assert "if ! run_as_service_user git" in body, body
+    assert 'if ! git -C "${APP_DIR}" pull' in body, body
     assert body.count("rollback_and_start") >= 4, (
         "every failure path has to restore the service, not just the health check"
     )
@@ -626,3 +636,88 @@ def test_rollback_brings_the_service_back_up() -> None:
     helper = text[start : text.index("\n}", start)]
     assert "systemctl_cmd start" in helper or "systemctl_cmd restart" in helper, helper
     assert "git" in helper, "the half-updated tree has to be put back"
+
+
+# --- the update path has to work on the installed layout -------------------
+
+
+def test_git_runs_as_root_not_as_the_service_user() -> None:
+    """The checkout is root-owned on purpose, and git has to write inside it.
+
+    `install.sh` creates `/opt/tguserbot` root-owned and chowns only `.venv`, so
+    that a compromised bot cannot rewrite the code the next update installs. A
+    `git pull` run as the service user cannot write `.git/FETCH_HEAD`, and git
+    refuses the repository outright first:
+
+        $ su tguserbot -c 'git -C /opt/tguserbot pull --ff-only'
+        fatal: detected dubious ownership in repository at '/opt/tguserbot'
+
+    So `tguserbotctl update` could never update anything. The installer already
+    pulls as root; the update path has to do the same.
+    """
+    body = _update_code_body()
+    assert "run_as_service_user git" not in body, (
+        "git has to run as root here, like install.sh does; as the service user "
+        "it cannot write a root-owned .git"
+    )
+    installer = INSTALL.read_text(encoding="utf-8")
+    assert re.search(r"^\s*git -C .*pull", installer, re.M), (
+        "the installer is the reference: it pulls as root"
+    )
+
+
+def test_rollback_returns_to_a_branch_not_a_detached_head() -> None:
+    """`git checkout <sha>` detaches HEAD, and a pull there fails forever.
+
+    After any rollback the checkout is left detached, so every later
+    `git pull --ff-only` errors with "You are not currently on a branch", and
+    `install.sh` aborts at its fetch step before it configures anything. Recovery
+    then needs a human to type `git checkout main`.
+    """
+    helper = _rollback_body()
+    assert 'checkout --quiet "${previous}"' not in helper, (
+        "checking out a commit detaches HEAD and permanently breaks the pull"
+    )
+    assert "reset --hard" in helper, "the rollback has to move the branch, not detach it"
+    assert re.search(r"rev-parse --abbrev-ref HEAD", _update_code_body()), (
+        "the branch has to be recorded before the pull to be restored to it"
+    )
+
+
+def test_a_failed_health_check_restarts_rather_than_being_a_no_op() -> None:
+    """`systemctl start` on an already-active unit succeeds and does nothing.
+
+    The health check had just failed, so the process running is the one that
+    failed it. Starting an active unit is a no-op, `restart` is never reached,
+    and the build that just failed keeps running while the tree is rolled back
+    underneath it.
+    """
+    text = CTL.read_text(encoding="utf-8")
+    start = text.index("rollback_and_start() {")
+    helper = text[start : text.index("\n}", start)]
+    restart = helper.index("systemctl_cmd restart")
+    start_cmd = helper.index("systemctl_cmd start")
+    assert restart < start_cmd, (
+        "start succeeds on an active unit, so the restart after it never runs; "
+        f"restart has to come first:\n{helper}"
+    )
+
+
+def test_the_application_directory_is_not_owned_by_the_service_user() -> None:
+    """Writing the checkout is how a compromised bot survives the next update.
+
+    `install.sh` states the opposite in a comment three lines below the line that
+    does it: "The checkout stays root-owned; only the venv and the runtime data
+    belong to the service user." A write bit on `/opt/tguserbot` lets the bot
+    unlink and replace `userbotctl`, which `/usr/local/bin/tguserbotctl` is a
+    symlink to, and which the operator then runs under sudo.
+    """
+    installer = INSTALL.read_text(encoding="utf-8")
+    line = re.search(r'^\s*install -d .*\$\{APP_DIR\}.*$', installer, re.M)
+    assert line, "the app directory is not created with install -d any more"
+    assert "-o root" in line.group(0), (
+        f"APP_DIR must be root-owned: {line.group(0).strip()!r}"
+    )
+    assert '"${APP_DIR}" "${DATA_DIR}"' not in line.group(0), (
+        "APP_DIR and DATA_DIR must not share one install -d: they need different owners"
+    )
