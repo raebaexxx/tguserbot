@@ -2,6 +2,10 @@
 Description=Telegram userbot with plugin manager
 After=network-online.target
 Wants=network-online.target
+# The bot refuses to start without an authorized session, so a crash loop here
+# would only spam the journal and risk a Telegram rate limit on the account.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,9 +15,18 @@ WorkingDirectory=/opt/tguserbot
 EnvironmentFile=/etc/tguserbot/userbot.env
 ExecStart=/opt/tguserbot/.venv/bin/python -m userbot run
 Restart=on-failure
-RestartSec=5
-TimeoutStopSec=30
+RestartSec=15
+# The app bounds its own shutdown with one shared deadline (see
+# SHUTDOWN_TIMEOUT in userbot/app.py). This must stay above that value so the
+# process is never SIGKILLed mid-unload; the old 30s was below the worst case.
+TimeoutStopSec=120
 UMask=0077
+
+# A 50 MiB plugin download lands in a tmpfs, so cap memory rather than letting
+# the box swap.
+MemoryMax=1G
+TasksMax=256
+LimitNOFILE=4096
 
 NoNewPrivileges=true
 PrivateTmp=true
@@ -24,8 +37,16 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+RestrictNamespaces=true
 LockPersonality=true
+RestrictRealtime=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# TGUSERBOT_PLUGIN_DIR defaults to /opt/tguserbot/plugins, which ProtectSystem
+# makes read-only. The watcher therefore cannot hot-reload local plugins here
+# unless the path is added below and pointed at a writable location. To enable
+# it, set TGUSERBOT_PLUGIN_DIR=/var/lib/tguserbot/plugins in userbot.env and add
+#   ReadWritePaths=/var/lib/tguserbot
+# (already present) -- the watcher needs no further access.
 ReadWritePaths=/var/lib/tguserbot
 
 [Install]

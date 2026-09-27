@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
+# Management wrapper for the tguserbot systemd service and for local runs.
 set -euo pipefail
+
+SCRIPT_NAME="userbotctl"
 
 resolve_script_dir() {
   local source="${BASH_SOURCE[0]}"
@@ -13,34 +16,40 @@ resolve_script_dir() {
 }
 
 SCRIPT_DIR="$(resolve_script_dir)"
+SERVICE_NAME="tguserbot.service"
+SERVICE_USER="tguserbot"
+SYSTEM_ENV_FILE="/etc/tguserbot/userbot.env"
+PYTHON="${APP_DIR:-${SCRIPT_DIR}}/.venv/bin/python"
+
+# Resolve the application directory once, and derive "system mode" from the
+# same answer. Previously APP_DIR and is_system_mode were computed separately
+# and could disagree, which sent a local checkout down the systemctl path.
 if [[ -n "${TGUSERBOT_APP_DIR:-}" ]]; then
   APP_DIR="${TGUSERBOT_APP_DIR}"
-elif [[ -x "/opt/tguserbot/userbotctl" && -f "/etc/systemd/system/tguserbot.service" ]]; then
+elif [[ -f "/etc/systemd/system/${SERVICE_NAME}" && -d "/opt/tguserbot" ]]; then
   # Older installations copied this wrapper instead of creating a symlink.
   APP_DIR="/opt/tguserbot"
 else
   APP_DIR="${SCRIPT_DIR}"
 fi
-SERVICE_NAME="tguserbot.service"
-SERVICE_USER="tguserbot"
-SYSTEM_ENV_FILE="/etc/tguserbot/userbot.env"
-LOCAL_ENV_FILE="${APP_DIR}/.env"
 PYTHON="${APP_DIR}/.venv/bin/python"
+LOCAL_ENV_FILE="${APP_DIR}/.env"
 
 usage() {
   cat <<'EOF'
 Usage: userbotctl <command>
 
 Commands:
-  setup       Install/update code, dependencies, and systemd unit
+  setup       Install/update code, dependencies, and the systemd unit
   first-run   Install, authorize, and start in one command
   auth        Run interactive Telegram authorization
-  start       Start the systemd service (or run locally)
+  start       Start the systemd service (or run locally in the foreground)
   stop        Stop the systemd service
   restart     Restart the systemd service
   status      Show service status
   logs        Follow service logs
-  update      Pull the latest code and reinstall locked dependencies
+  update      Pull the latest code, reinstall locked deps, verify, restart
+  health      Run the test suite and static checks
   help        Show this help
 
 Server examples:
@@ -50,32 +59,40 @@ Server examples:
   sudo tguserbotctl logs
 
 Local examples:
+  ./userbotctl setup
   ./userbotctl auth
   ./userbotctl start
+
+Environment:
+  TGUSERBOT_APP_DIR   Override the application directory
+  TGUSERBOT_ENV_FILE  Override the environment file used by `auth`
 EOF
 }
 
 is_system_mode() {
-  [[ -f "/etc/systemd/system/${SERVICE_NAME}" && -d "/opt/tguserbot" ]]
+  [[ -f "/etc/systemd/system/${SERVICE_NAME}" && -d "${APP_DIR}" ]]
 }
 
 require_root_for_system() {
   if is_system_mode && [[ "${EUID}" -ne 0 ]]; then
-    echo "This command requires root. Try: sudo userbotctl ${1}" >&2
+    echo "This command requires root. Try: sudo ${SCRIPT_NAME} ${1}" >&2
     exit 1
   fi
 }
 
 require_python() {
   if [[ ! -x "${PYTHON}" ]]; then
-    echo "Python environment not found at ${PYTHON}. Run: sudo tguserbotctl setup" >&2
+    echo "Python environment not found at ${PYTHON}. Run: ${SCRIPT_NAME} setup" >&2
     exit 1
   fi
 }
 
 run_as_service_user() {
   if is_system_mode && [[ "${EUID}" -eq 0 ]]; then
-    runuser -u "${SERVICE_USER}" -- "$@"
+    # -p keeps a pseudo-terminal so the interactive Telegram login (phone
+    # number, 2FA password) can actually prompt. Without it stdin is not a TTY
+    # and `auth` fails with an opaque EOF.
+    runuser -u "${SERVICE_USER}" -p -- "$@"
   else
     "$@"
   fi
@@ -85,11 +102,71 @@ systemctl_cmd() {
   systemctl "$@"
 }
 
+resolve_env_file() {
+  local env_file="${TGUSERBOT_ENV_FILE:-}"
+  if [[ -z "${env_file}" ]]; then
+    if is_system_mode; then
+      env_file="${SYSTEM_ENV_FILE}"
+    else
+      env_file="${LOCAL_ENV_FILE}"
+    fi
+  fi
+  printf '%s' "${env_file}"
+}
+
+read_env_value() {
+  # read_env_value <file> <key>
+  # Prints the last value of KEY in a systemd-style EnvironmentFile.
+  local file="$1" key="$2" line value=""
+  [[ -f "${file}" ]] || return 0
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ "${line}" == \#* || -z "${line}" ]] && continue
+    line="${line#export }"
+    line="${line#export}"
+    line="${line# }"
+    [[ "${line}" == "${key}="* ]] || continue
+    value="${line#"${key}="}"
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+  done < "${file}"
+  printf '%s' "${value}"
+}
+
+log_file_path() {
+  # The log directory is configurable, so read it from the environment file
+  # instead of assuming <app>/var/logs. Hardcoding it made `logs` and `status`
+  # silently point at a file that does not exist on a configured install.
+  local env_file log_dir data_dir
+  env_file="$(resolve_env_file)"
+  log_dir="$(read_env_value "${env_file}" TGUSERBOT_LOG_DIR)"
+  if [[ -z "${log_dir}" ]]; then
+    data_dir="$(read_env_value "${env_file}" TGUSERBOT_DATA_DIR)"
+    if [[ -z "${data_dir}" ]]; then
+      data_dir="${APP_DIR}/var"
+    elif [[ "${data_dir}" != /* ]]; then
+      data_dir="${APP_DIR}/${data_dir}"
+    fi
+    log_dir="${data_dir}/logs"
+  elif [[ "${log_dir}" != /* ]]; then
+    log_dir="${APP_DIR}/${log_dir}"
+  fi
+  printf '%s' "${log_dir}/userbot.log"
+}
+
 install_system() {
   require_root_for_system setup
   if is_system_mode; then
     bash "${APP_DIR}/deploy/install.sh"
   else
+    command -v python3 >/dev/null || {
+      echo "python3 is required." >&2
+      exit 1
+    }
     python3 -m venv "${APP_DIR}/.venv"
     "${PYTHON}" -m pip install --upgrade pip
     if [[ -f "${APP_DIR}/requirements.lock" ]]; then
@@ -102,18 +179,16 @@ install_system() {
 
 run_auth() {
   require_python
-  local env_file="${TGUSERBOT_ENV_FILE:-}"
-  if [[ -z "${env_file}" ]]; then
-    if is_system_mode; then
-      env_file="${SYSTEM_ENV_FILE}"
-    else
-      env_file="${LOCAL_ENV_FILE}"
-    fi
-  fi
+  local env_file
+  env_file="$(resolve_env_file)"
   if [[ ! -f "${env_file}" ]]; then
     echo "Environment file not found: ${env_file}" >&2
     echo "Create it from .env.example and fill in TGUSERBOT_API_ID/TGUSERBOT_API_HASH." >&2
     exit 1
+  fi
+  if [[ -n "${TGUSERBOT_PHONE:-}" ]]; then
+    echo "Note: TGUSERBOT_PHONE is set in the calling shell; the value in" \
+      "${env_file} is the one that will be used." >&2
   fi
   run_as_service_user "${PYTHON}" -m userbot auth \
     --root "${APP_DIR}" --env-file "${env_file}"
@@ -127,7 +202,7 @@ start_service() {
   else
     require_python
     exec "${PYTHON}" -m userbot run \
-      --root "${APP_DIR}" --env-file "${LOCAL_ENV_FILE}"
+      --root "${APP_DIR}" --env-file "$(resolve_env_file)"
   fi
 }
 
@@ -157,46 +232,92 @@ show_status() {
     systemctl_cmd --no-pager --full status "${SERVICE_NAME}"
   else
     echo "Local mode: service is managed by the foreground process."
-    if [[ -f "${APP_DIR}/var/logs/userbot.log" ]]; then
-      tail -n 30 "${APP_DIR}/var/logs/userbot.log"
+    local log_file
+    log_file="$(log_file_path)"
+    if [[ -f "${log_file}" ]]; then
+      tail -n 30 "${log_file}"
     fi
   fi
 }
 
 show_logs() {
   if is_system_mode; then
+    require_root_for_system logs
     systemctl_cmd --no-pager --full status "${SERVICE_NAME}" >/dev/null || true
     journalctl -u "${SERVICE_NAME}" -f
   else
-    require_python
-    touch "${APP_DIR}/var/logs/userbot.log"
-    tail -f "${APP_DIR}/var/logs/userbot.log"
+    # No venv needed here: this only tails the log file.
+    local log_file
+    log_file="$(log_file_path)"
+    # The log directory is created by the app, not by this script, so it may not
+    # exist yet; `touch` used to fail here on a clean install.
+    mkdir -p "$(dirname "${log_file}")"
+    touch "${log_file}"
+    tail -f "${log_file}"
+  fi
+}
+
+# Verify the new code can actually start before restarting into it. A failed
+# health check restores the previous commit instead of leaving a crash loop.
+health_check() {
+  if is_system_mode; then
+    systemctl_cmd is-active --quiet "${SERVICE_NAME}"
+  else
+    "${PYTHON}" -c 'import userbot, userbot.app, userbot.manager' >/dev/null
   fi
 }
 
 update_code() {
   if is_system_mode; then
     require_root_for_system update
-    chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}"
+    local previous
+    previous="$(git -C "${APP_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.venv" 2>/dev/null || true
     run_as_service_user git -C "${APP_DIR}" pull --ff-only
-    run_as_service_user bash -c "cd '${APP_DIR}' && '${PYTHON}' -m pip install -r requirements.lock"
-    systemctl_cmd restart "${SERVICE_NAME}"
+    run_as_service_user bash -c \
+      "cd '${APP_DIR}' && '${PYTHON}' -m pip install -r requirements.lock"
+    if systemctl_cmd restart "${SERVICE_NAME}"; then
+      sleep 3
+      if health_check; then
+        echo "Updated to $(git -C "${APP_DIR}" rev-parse --short HEAD); service is healthy."
+      else
+        echo "Health check failed after updating to $(git -C "${APP_DIR}" rev-parse --short HEAD)." >&2
+        echo "Rolling back to ${previous}." >&2
+        run_as_service_user git -C "${APP_DIR}" checkout --quiet "${previous}"
+        run_as_service_user bash -c \
+          "cd '${APP_DIR}' && '${PYTHON}' -m pip install -r requirements.lock"
+        systemctl_cmd restart "${SERVICE_NAME}" || true
+        exit 1
+      fi
+    else
+      echo "Restart failed; rolling back to ${previous}." >&2
+      run_as_service_user git -C "${APP_DIR}" checkout --quiet "${previous}"
+      systemctl_cmd restart "${SERVICE_NAME}" || true
+      exit 1
+    fi
   else
     git -C "${APP_DIR}" pull --ff-only
     (cd "${APP_DIR}" && "${PYTHON}" -m pip install -r requirements.lock)
   fi
 }
 
-command="${1:-help}"
-first_run() {
-  install_system
-  run_auth
-  start_service
+run_health_checks() {
+  if is_system_mode; then
+    require_root_for_system health
+    chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.venv" 2>/dev/null || true
+    run_as_service_user bash -c "cd '${APP_DIR}' && '${PYTHON}' -m pip install -e '.[dev]'"
+    run_as_service_user bash -c "cd '${APP_DIR}' && '${PYTHON}' -m pytest"
+  else
+    require_python
+    (cd "${APP_DIR}" && "${PYTHON}" -m pip install -e '.[dev]' && "${PYTHON}" -m pytest)
+  fi
 }
+
+command="${1:-help}"
 
 case "${command}" in
   setup) install_system ;;
-  first-run) first_run ;;
+  first-run) install_system; run_auth; start_service ;;
   auth) run_auth ;;
   start) start_service ;;
   stop) stop_service ;;
@@ -204,6 +325,7 @@ case "${command}" in
   status) show_status ;;
   logs) show_logs ;;
   update) update_code ;;
+  health) run_health_checks ;;
   help|-h|--help) usage ;;
   *)
     echo "Unknown command: ${command}" >&2
