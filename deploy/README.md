@@ -5,15 +5,14 @@ The server deployment intentionally uses systemd instead of Docker.
 ## Requirements
 
 - Ubuntu/Debian-like systemd host
-- Python 3.12+
-- Git
-- ffmpeg (for media merging plugins)
+- Python 3.12+ with `venv` support (`apt-get install -y git python3 python3-venv`)
+- `ffmpeg` only if you use a plugin that merges media formats
 - Outbound access to Telegram and GitHub
 
-## Install
+The installer checks these up front and reports what is missing, rather than
+failing somewhere inside `pip`.
 
-Clone this repository on the server or copy the checkout to `/opt/tguserbot`,
-then run:
+## Install
 
 ```bash
 sudo bash deploy/install.sh
@@ -24,30 +23,41 @@ The installer creates:
 - system user `tguserbot`;
 - application directory `/opt/tguserbot`;
 - configuration directory `/etc/tguserbot`;
-- persistent data directory `/var/lib/tguserbot`;
-- systemd unit `tguserbot.service`.
+- persistent data directory `/var/lib/tguserbot`, including `logs/`;
+- the systemd unit `tguserbot.service` and the `/usr/local/bin/tguserbotctl`
+  symlink.
 
-It also installs `/usr/local/bin/tguserbotctl`, a small management wrapper.
-It does not create Telegram credentials and does not start the service.
+It does not create Telegram credentials and does not start the service. It is
+idempotent: re-running it updates the code, keeps your existing
+`userbot.env`, and re-installs the unit.
+
+Ownership is deliberate: `/opt/tguserbot` stays root-owned and only `.venv`
+belongs to the service user. An earlier version chowned the whole checkout,
+which let a compromised bot rewrite its own code and break the next
+`git pull --ff-only`.
 
 ## Configure and authenticate
 
-Edit `/etc/tguserbot/userbot.env` as root. Put the `api_id` and `api_hash` there;
-do not put them in Git or send them in chat. Then authenticate interactively:
+Edit `/etc/tguserbot/userbot.env` as root and put the `api_id` and `api_hash`
+there. Do not put them in Git or send them in chat.
 
 ```bash
-sudo -u tguserbot /opt/tguserbot/.venv/bin/python -m userbot auth \
-  --root /opt/tguserbot --env-file /etc/tguserbot/userbot.env
+sudoedit /etc/tguserbot/userbot.env
+sudo chmod 640 /etc/tguserbot/userbot.env
 ```
 
-After filling the credentials, install, authorize, and start everything with
-one command:
+Then install, authorize, and start everything with one command:
 
 ```bash
 sudo tguserbotctl first-run
 ```
 
-For subsequent starts use:
+`first-run` installs, runs the interactive login, and starts the service. The
+login runs under a pseudo-terminal so the phone number and 2FA password prompts
+work; run it yourself with `sudo tguserbotctl auth` if you would rather see each
+step.
+
+For subsequent starts:
 
 ```bash
 sudo tguserbotctl start
@@ -60,20 +70,70 @@ sudo tguserbotctl status
 sudo tguserbotctl logs
 sudo tguserbotctl restart
 sudo tguserbotctl update
+sudo tguserbotctl health
 ```
 
-The first start is intentionally read-only apart from the three demo commands.
+## What runs on first start
+
+`notes`, `status`, and `echo` are demo plugins and are loaded by default, so
+they are present in production. `tiktok` is also loaded by default and will
+download and upload files when a command is used. If you do not want the demo
+commands in production, disable them in `userbot.env`:
+
+```bash
+TGUSERBOT_DISABLED_PLUGINS=echo,notes,tiktok
+```
+
+A plugin listed there cannot be re-enabled at runtime; remove it from the list
+first and restart.
+
+## Hot reload on a server
+
+Local plugin changes are detected by the watcher, **except** in the default
+deployment. The unit sets `ProtectSystem=strict`, which makes
+`/opt/tguserbot/plugins` read-only, so the watcher cannot fire there. To enable
+it, point the plugin directory at writable storage:
+
+```toml
+TGUSERBOT_PLUGIN_DIR=/var/lib/tguserbot/plugins
+```
+
+and copy your plugins there. `/var/lib/tguserbot` is already in the unit's
+`ReadWritePaths`. Alternatively set `TGUSERBOT_WATCH=0` to switch the watcher
+off entirely.
+
+Git plugin updates are never automatic; use the owner-only
+`/ub plugin update <name>` command after reviewing the commit.
 
 ## Updating
 
-For core changes:
-
 ```bash
-sudo -u tguserbot git -C /opt/tguserbot pull --ff-only
-sudo -u tguserbot /opt/tguserbot/.venv/bin/python -m pytest
-sudo systemctl restart tguserbot
+sudo tguserbotctl update
 ```
 
-Local plugin-only changes are detected by the watcher. Git plugin updates are
-never automatic; use the owner-only `/ub plugin update <name>` command after
-reviewing the commit.
+This pulls the latest code, reinstalls the locked dependencies, restarts the
+service, and waits for a health check. If the service does not come up it
+restores the previous commit and reinstalls from that, so a bad update does not
+leave a crash loop.
+
+To inspect or change the configuration the bot actually sees:
+
+```text
+/ub version
+/ub plugins
+/ub status
+```
+
+## Service behaviour worth knowing
+
+- `TimeoutStopSec=120`. The app bounds its own shutdown with a single shared
+  deadline of 25 seconds and unloads plugins in parallel, so a slow plugin can
+  no longer push the process past the limit and get `SIGKILL`ed mid-unload.
+- `StartLimitBurst=5` per 300 seconds. Without it, a revoked session exits
+  immediately and `Restart=on-failure` restarts it every five seconds forever.
+- `MemoryMax=1G`. `PrivateTmp` means plugin downloads land in a tmpfs, so a
+  large file is RAM, not disk.
+- The session file is protected by a `flock`, so a second `userbot run` against
+  the same data directory fails immediately instead of corrupting the auth key.
+- A heartbeat file is refreshed under `/var/lib/tguserbot` while the process is
+  healthy, for external monitoring.
