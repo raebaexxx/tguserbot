@@ -79,7 +79,13 @@ class SystemdNotifier:
         return self._send("WATCHDOG=1")
 
     def reset(self) -> bool:
-        """Ask systemd to reset the start rate limiter after a clean start."""
+        """Ask systemd to reset the start rate limiter after a clean start.
+
+        Deliberately carries no ``STATUS``: ``systemctl status`` keeps the last
+        status text it was handed, so a "recovered" message here would leave the
+        service looking like it is still recovering long after it is healthy. The
+        caller sends its real status in the following :meth:`ready`.
+        """
         if not self._socket:
             return False
-        return self._send("READY=1\nRESET=1\nSTATUS=recovered after a failure")
+        return self._send("RESET=1")

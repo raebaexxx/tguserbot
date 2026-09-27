@@ -101,7 +101,11 @@ def test_stopping_and_reset(
     assert notifier.reset() is True
     messages = drain(server)
     assert any(b"STOPPING=1" in message for message in messages)
-    assert any(b"RESET=1" in message for message in messages)
+    reset_messages = [m for m in messages if b"RESET=1" in m]
+    assert reset_messages, "RESET=1 was not sent"
+    # systemctl status keeps the last STATUS it was given, so a "recovered"
+    # message here would stick around and misrepresent a healthy service.
+    assert all(b"STATUS=" not in m for m in reset_messages), reset_messages
 
 
 def test_a_broken_socket_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -104,11 +104,13 @@ class UserbotApp:
                 self.gateway.monitor_connection(), name="connection-monitor"
             )
             self._started = True
-            # Type=notify only counts the service as started once we say so.
+            # Reset the start rate limiter first, then report readiness: a
+            # Type=notify unit is only "started" once READY=1 arrives, and the
+            # status text is what `systemctl status` will keep showing.
+            self.notifier.reset()
             self.notifier.ready(
                 f"connected as @{getattr(me, 'username', None) or getattr(me, 'id', '?')}"
             )
-            self.notifier.reset()
             self.logger.info(
                 "Userbot started as @%s with %d active plugins",
                 getattr(me, "username", None) or getattr(me, "id", "unknown"),
