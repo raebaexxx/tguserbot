@@ -253,6 +253,106 @@ def unit_text() -> str:
     return UNIT.read_text(encoding="utf-8")
 
 
+def unit_sections(path: Path = UNIT) -> dict[str, list[str]]:
+    """Parse an ini-style unit file into section -> directive names."""
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            sections.setdefault(current, [])
+            continue
+        if current and "=" in line:
+            sections[current].append(line.split("=", 1)[0].strip())
+    return sections
+
+
+#: systemd silently ignores these in the wrong section, so a misplaced directive
+#: looks like it works. Confirmed against a live systemd, which logged
+#: "Unknown key name 'OnFailure' in section 'Service', ignoring."
+UNIT_ONLY_DIRECTIVES = {
+    "OnFailure",
+    "OnFailureJobMode",
+    "StartLimitIntervalSec",
+    "StartLimitBurst",
+    "After",
+    "Before",
+    "Requires",
+    "Wants",
+    "PartOf",
+    "RefuseManualStart",
+}
+
+SERVICE_ONLY_DIRECTIVES = {
+    "ExecStart",
+    "ExecStartPre",
+    "Type",
+    "User",
+    "Group",
+    "EnvironmentFile",
+    "WorkingDirectory",
+    "MemoryMax",
+    "LimitNOFILE",
+    "WatchdogSec",
+    "TimeoutStopSec",
+    "NotifyAccess",
+    "UMask",
+    "ReadWritePaths",
+}
+
+
+def test_directives_are_in_the_section_systemd_expects() -> None:
+    """A directive in the wrong section is dropped without any error."""
+    for path in (UNIT, REPO_ROOT / "deploy" / "systemd" / "tguserbot-alert@.service"):
+        sections = unit_sections(path)
+        assert "Unit" in sections and "Service" in sections, path.name
+        for directive in sections["Service"]:
+            assert directive not in UNIT_ONLY_DIRECTIVES, (
+                f"{path.name}: {directive}= belongs in [Unit], not [Service]"
+            )
+        for directive in sections["Unit"]:
+            assert directive not in SERVICE_ONLY_DIRECTIVES, (
+                f"{path.name}: {directive}= belongs in [Service], not [Unit]"
+            )
+
+
+def test_alerting_is_wired_to_a_unit_that_exists() -> None:
+    assert "OnFailure=tguserbot-alert@%n.service" in unit_text()
+    alert = (REPO_ROOT / "deploy" / "systemd" / "tguserbot-alert@.service").read_text(
+        encoding="utf-8"
+    )
+    assert "Type=oneshot" in alert
+    assert "Restart=no" in alert, "a failed alert must not retry forever"
+    assert "deploy/alert.sh" in alert
+    assert (REPO_ROOT / "deploy" / "alert.sh").is_file()
+    assert "tguserbot-alert@.service" in (REPO_ROOT / "deploy" / "install.sh").read_text(
+        encoding="utf-8"
+    ), "the OnFailure= target must be installed or the hook never fires"
+
+
+def test_alerting_is_opt_in_and_documented() -> None:
+    for example in (REPO_ROOT / ".env.example", REPO_ROOT / "deploy" / "userbot.env.example"):
+        text = example.read_text(encoding="utf-8")
+        assert re.search(r"^TGUSERBOT_ALERT_CHAT=\s*$", text, re.M), (
+            f"{example.name} must ship TGUSERBOT_ALERT_CHAT empty so alerting is opt-in"
+        )
+    assert "TGUSERBOT_ALERT_CHAT" in (REPO_ROOT / "deploy" / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_alert_script_is_sound() -> None:
+    alert = REPO_ROOT / "deploy" / "alert.sh"
+    assert alert.is_file()
+    assert run_bash("-n", str(alert)).returncode == 0
+    text = alert.read_text(encoding="utf-8")
+    assert "set -uo pipefail" in text
+    assert "except Exception" in text, "alerting must never raise"
+
+
 def test_unit_runs_as_the_service_user() -> None:
     text = unit_text()
     assert "User=tguserbot" in text

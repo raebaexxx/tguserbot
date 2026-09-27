@@ -6,6 +6,12 @@ Wants=network-online.target
 # would only spam the journal and risk a Telegram rate limit on the account.
 StartLimitIntervalSec=300
 StartLimitBurst=5
+# systemd gives up after StartLimitBurst failures and the bot then stays down
+# silently. Notify the owner first, then let systemd do its job. Set
+# TGUSERBOT_ALERT_CHAT in userbot.env to enable; without it the hook exits 0.
+# OnFailure= belongs to [Unit], not [Service]; systemd ignores it in [Service]
+# without an error, which is how this went unnoticed.
+OnFailure=tguserbot-alert@%n.service
 
 [Service]
 Type=notify
@@ -54,11 +60,6 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 #   ReadWritePaths=/var/lib/tguserbot
 # (already present) -- the watcher needs no further access.
 ReadWritePaths=/var/lib/tguserbot
-
-# systemd gives up after StartLimitBurst failures and the bot then stays down
-# silently. Notify the owner first, then let systemd do its job. Set
-# TGUSERBOT_ALERT_CHAT in userbot.env to enable; without it the hook exits 0.
-OnFailure=tguserbot-alert@%n.service
 
 [Install]
 WantedBy=multi-user.target
