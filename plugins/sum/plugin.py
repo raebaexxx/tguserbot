@@ -16,8 +16,10 @@ subtly wrong.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -143,11 +145,21 @@ class Plugin(BasePlugin):
         count, want_media = parsed
         try:
             async with ctx.rate_limiter.slot("sum"):
-                collected = await self.collect(ctx, command.event, count, want_media)
-                if collected.message_count == 0:
-                    await command.respond("В этом чате нечего summarировать: сообщений не нашлось.")
-                    return
-                reply = await self.summarise(ctx, collected)
+                # The scratch directory has to outlive the download, because the
+                # attachments are read one step later, inside `summarise`. It used
+                # to be created inside `download` and returned from, so by the
+                # time anything read a file the directory was already gone: every
+                # attachment was dropped at the first read, and the reply said
+                # nothing was missing, because nothing had been recorded as
+                # missing either.
+                with scratch_directory(want_media) as scratch:
+                    collected = await self.collect(ctx, command.event, count, want_media, scratch)
+                    if collected.message_count == 0:
+                        await command.respond(
+                            "В этом чате нечего summarировать: сообщений не нашлось."
+                        )
+                        return
+                    reply = await self.summarise(ctx, collected)
                 await command.respond(self.compose(collected, reply))
                 notice = self.router.notice() if self.router is not None else ""
                 if notice:
@@ -167,9 +179,18 @@ class Plugin(BasePlugin):
     # -- reading the chat ----------------------------------------------------
 
     async def collect(
-        self, ctx: PluginContext, event: Any, count: int, want_media: bool
+        self,
+        ctx: PluginContext,
+        event: Any,
+        count: int,
+        want_media: bool,
+        scratch: Path | None = None,
     ) -> Collected:
-        """Read the recent messages and, if allowed, download their attachments."""
+        """Read the recent messages and, if allowed, download their attachments.
+
+        ``scratch`` is the directory the attachments go into. It is the caller's
+        to create and to keep alive until the request has been built.
+        """
         client = ctx.client
         entity = await client.get_input_entity(event.chat_id)
         own_id = getattr(event, "id", None)
@@ -209,71 +230,79 @@ class Plugin(BasePlugin):
                 )
             return collected
 
-        collected.media, media_skipped = await self.download(ctx, downloadable)
+        collected.media, media_skipped = await self.download(ctx, downloadable, scratch)
         collected.skipped.extend(media_skipped)
         return collected
 
     async def download(
-        self, ctx: PluginContext, messages: list[Any]
+        self, ctx: PluginContext, messages: list[Any], scratch: Path | None
     ) -> tuple[list[MediaItem], list[SkippedMedia]]:
         """Fetch attachments newest-first, within the configured budget.
 
         Newest-first because that is the order the budget is spent in, and the
-        recent attachments are the ones the summary is usually about.
+        recent attachments are the ones the summary is usually about. The order
+        matters twice over: when the cap bites, the oldest are what gets dropped,
+        and the prompt tells the model the parts arrive newest-first, so the two
+        have to agree.
         """
         per_file = ctx.config.int_value("max_media_bytes", 4 * 1024 * 1024)
         total = ctx.config.int_value("max_total_media_bytes", 15 * 1024 * 1024)
-        ordered = list(reversed(messages))
+        # `messages` arrives newest-first from iter_messages. Reversing it here
+        # spent the budget oldest-first, which is the opposite of both this
+        # docstring and what the model is told.
+        ordered = list(messages)
         collected = Collected()
         skipped: list[SkippedMedia] = []
-        with tempfile.TemporaryDirectory(prefix="sum-") as directory:
-            for index, message in enumerate(ordered):
-                kind = classify(message)
-                if kind is None:
-                    continue
-                mime = mime_for(message, kind)
-                if mime is None:
-                    skipped.append(
-                        SkippedMedia(
-                            getattr(message, "id", 0),
-                            f"{kind}: не удалось определить формат",
-                        )
+        if scratch is None:
+            raise RuntimeError("download needs a scratch directory that outlives it")
+        for index, message in enumerate(ordered):
+            kind = classify(message)
+            if kind is None:
+                continue
+            mime = mime_for(message, kind)
+            if mime is None:
+                skipped.append(
+                    SkippedMedia(
+                        getattr(message, "id", 0),
+                        f"{kind}: не удалось определить формат",
                     )
-                    continue
-                target = Path(directory) / f"{index}{Path(str(_name_of(message))).suffix}"
-                try:
-                    # telethon's download_media is a coroutine function. Running
-                    # it in a thread and awaiting the result handed a coroutine
-                    # object to Path(), which blew up on every attachment.
-                    got = await ctx.client.download_media(message, file=str(target))
-                except Exception as exc:
-                    LOGGER.debug("could not download message %s: %s", index, exc)
-                    skipped.append(SkippedMedia(getattr(message, "id", 0), f"{kind}: не скачалось"))
-                    continue
-                path = Path(got) if got else target
-                if not path.is_file():
-                    skipped.append(SkippedMedia(getattr(message, "id", 0), f"{kind}: не скачалось"))
-                    continue
-                take_media(
-                    collected,
-                    [
-                        (
-                            message,
-                            MediaItem(
-                                getattr(message, "id", 0), kind, mime, path, path.stat().st_size
-                            ),
-                        )
-                    ],
-                    max_file_bytes=per_file,
-                    max_total_bytes=total,
                 )
+                continue
+            target = scratch / f"{index}{Path(str(_name_of(message))).suffix}"
+            try:
+                # telethon's download_media is a coroutine function. Running
+                # it in a thread and awaiting the result handed a coroutine
+                # object to Path(), which blew up on every attachment.
+                got = await ctx.client.download_media(message, file=str(target))
+            except Exception as exc:
+                LOGGER.debug("could not download message %s: %s", index, exc)
+                skipped.append(SkippedMedia(getattr(message, "id", 0), f"{kind}: не скачалось"))
+                continue
+            path = Path(got) if got else target
+            if not path.is_file():
+                skipped.append(SkippedMedia(getattr(message, "id", 0), f"{kind}: не скачалось"))
+                continue
+            take_media(
+                collected,
+                [
+                    (
+                        message,
+                        MediaItem(getattr(message, "id", 0), kind, mime, path, path.stat().st_size),
+                    )
+                ],
+                max_file_bytes=per_file,
+                max_total_bytes=total,
+            )
         return collected.media, skipped + collected.skipped
 
     # -- asking --------------------------------------------------------------
 
     async def summarise(self, ctx: PluginContext, collected: Collected) -> str:
         router = self.require_router()
-        payload = await asyncio.to_thread(read_media, collected.media)
+        payload, unreadable = await asyncio.to_thread(read_media, collected.media)
+        # Folded into the notes so the reply says what the model did not get,
+        # rather than the attachment disappearing without a trace.
+        collected.notes.extend(unreadable)
         turns = [
             Turn(
                 "user",
@@ -315,19 +344,44 @@ def _name_of(message: Any) -> str:
     return name if isinstance(name, str) else "attachment"
 
 
-def read_media(items: list[MediaItem]) -> list[Part]:
-    """Read attachments into inline parts.
+@contextlib.contextmanager
+def scratch_directory(enabled: bool) -> Iterator[Path | None]:
+    """A temporary directory for attachments, or nothing when media is off.
+
+    Owned by the command handler rather than by ``download``, because the files
+    are read after the download has returned. A directory whose lifetime ends
+    with the download is a directory whose contents are gone before they are
+    used.
+    """
+    if not enabled:
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="sum-") as directory:
+        yield Path(directory)
+
+
+def read_media(items: list[MediaItem]) -> tuple[list[Part], list[str]]:
+    """Read attachments into inline parts, and say which ones could not be read.
 
     Off the event loop deliberately: these are blocking file reads, and a few
     megabytes of voice notes would otherwise stall every other plugin.
+
+    Returns the parts and a note per unreadable file. A bare ``continue`` here
+    looks like tidiness and is the worst possible behaviour: the summary silently
+    describes a conversation it only partly saw, and nothing anywhere records
+    that an attachment went missing.
     """
     import base64
 
     parts: list[Part] = []
+    unreadable: list[str] = []
     for item in items:
         try:
             data = item.path.read_bytes()
-        except OSError:
+        except OSError as exc:
+            unreadable.append(
+                f"сообщение {item.message_id}: {item.kind} не удалось прочитать ({exc.strerror})"
+            )
             continue
         parts.append(Part.media(item.mime, base64.b64encode(data).decode("ascii")))
-    return parts
+    return parts, unreadable

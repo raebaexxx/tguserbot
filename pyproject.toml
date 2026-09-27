@@ -52,7 +52,10 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["src/userbot"]
+# `plugins/` is measured because a quarter of the code that runs in production
+# was not being counted at all. A coverage number that silently excludes the
+# plugins reads as a statement about the whole system and is not one.
+source = ["src/userbot", "plugins"]
 branch = true
 
 [tool.coverage.report]

@@ -193,11 +193,24 @@ class ProgressEditor:
             await self._flush()
 
 
-#: The roles this plugin routes separately. Each gets its own chain, because the
-#: head of the chain is that role's configured model and the router is what binds
-#: it: one router for both would answer code requests with the chat model and
-#: quietly ignore ``code_model``.
-ROLES = ("chat", "code")
+#: Every role gets its own chain, because the head of the chain is that role's
+#: configured model and the router is what binds it: one router for everything
+#: would answer code requests with the chat model and quietly ignore
+#: ``code_model``.
+#:
+#: Derived from ``MODELS`` rather than written out. It was a literal
+#: ``("chat", "code")`` once, and ``/ub ai pro`` and ``/ub ai fast`` then reported
+#: a missing API key on every call — a hand-written copy of a mapping, drifting.
+ROLES = tuple(MODELS)
+
+
+class UnknownRoleError(RuntimeError):
+    """A role was requested that this plugin does not route.
+
+    Deliberately not a ``MissingKeyError``. A role with no router is a mistake in
+    this file, and reporting it as "the API key is not set" sent the operator to
+    a configuration file that was already correct.
+    """
 
 
 class Plugin(BasePlugin):
@@ -242,8 +255,20 @@ class Plugin(BasePlugin):
     # -- helpers -----------------------------------------------------------
 
     def require_router(self, kind: str = "chat") -> ModelRouter:
+        """The router for one role, or why there is not one.
+
+        The two reasons are kept apart because they send the reader to different
+        places. "No key" is fixed in ``/etc/tguserbot/userbot.env``; "no such
+        role" is a defect in this file, and answering it with the first was how
+        ``/ub ai pro`` spent a day blaming a key that was present and working.
+        """
         router = self.routers.get(kind)
-        if router is None or not router.has_key:
+        if router is None:
+            raise UnknownRoleError(
+                f"в плагине ai нет маршрута для роли {kind!r}; "
+                f"известные роли: {', '.join(sorted(self.routers))}"
+            )
+        if not router.has_key:
             raise MissingKeyError(
                 "Ключ Gemini не задан. Добавьте TGUSERBOT_GEMINI_API_KEY в "
                 "/etc/tguserbot/userbot.env и перезапустите сервис."
@@ -336,7 +361,7 @@ class Plugin(BasePlugin):
                             f"/ub ai {guess} {rest}"
                         )
                     await self.ask(ctx, command, text, kind="chat")
-        except (GeminiError, MissingKeyError) as exc:
+        except (GeminiError, MissingKeyError, UnknownRoleError) as exc:
             # Also to the log, with the reason. The user is told, and then the
             # reason is gone: nothing reaches the journal, so the next "it says
             # something went wrong" can only be answered by asking the user to
