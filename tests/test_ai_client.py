@@ -20,19 +20,20 @@ from typing import Any
 import httpx
 import pytest
 
-from conftest import shipped_submodule
-
 KEY = "test-key-abcdefghijklmnop"
 
 
 @pytest.fixture(scope="module")
 def client() -> Any:
-    """The ``_client`` submodule of the shipped ai plugin, loaded once."""
-    loaded, module = shipped_submodule("ai", "_client")
-    yield module
-    from userbot.loader import cleanup_loaded_plugin
+    """The shared Gemini client, now part of the core rather than one plugin.
 
-    cleanup_loaded_plugin(loaded)
+    It is imported rather than loaded through the plugin loader because two
+    plugins use it now, and a test that went through one of them would fail for
+    no reason when the other changed.
+    """
+    from userbot import gemini
+
+    return gemini
 
 
 @pytest.fixture
@@ -341,7 +342,7 @@ def test_the_key_is_not_logged_on_retry(client: Any, run: Any, caplog: Any) -> N
         attempts=2,
         backoff=0.001,
     )
-    with caplog.at_level("DEBUG", logger="userbot.plugin.ai.client"):
+    with caplog.at_level("DEBUG", logger="userbot.gemini"):
         with pytest.raises(client.GeminiError):
             run(instance.generate(turns(client)))
     assert KEY not in caplog.text

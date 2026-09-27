@@ -188,17 +188,57 @@ class FakeEvent:
         self.deleted = True
 
 
+class _AsyncList:
+    """Async iteration over a list, with telethon's ``limit`` semantics.
+
+    Telethon's ``iter_messages`` is an async generator yielding newest first, and
+    a plugin that reads a chat depends on both facts.
+    """
+
+    def __init__(self, items: list[Any], limit: Any = None) -> None:
+        self._items = list(items)
+        self._limit = limit
+
+    async def _walk(self) -> Any:
+        for index, item in enumerate(self._items):
+            if self._limit is not None and index >= int(self._limit):
+                return
+            yield item
+
+    def __aiter__(self) -> Any:
+        return self._walk()
+
+
 class FakeClient:
-    """Records Telethon event-handler registrations with identity semantics."""
+    """Stands in for the Telethon client, with the surface plugins actually use."""
 
     def __init__(self) -> None:
+        self.messages: list[Any] = []
+        self.downloaded: list[Any] = []
+        self.entities: dict[Any, Any] = {}
         self.handlers: list[tuple[Any, Any]] = []
         self.connected = True
+
+    async def get_input_entity(self, entity: Any) -> Any:
+        return self.entities.get(entity, entity)
+
+    def iter_messages(self, entity: Any, **kwargs: Any) -> Any:
+        """Newest first, like telethon, and asynchronously as the code uses it."""
+        return _AsyncList(list(reversed(self.messages)), limit=kwargs.get("limit"))
+
+    async def aiter(self, entity: Any, **kwargs: Any) -> Any:
+        async for message in self.iter_messages(entity, **kwargs):
+            yield message
+
+    def download_media(self, message: Any, **kwargs: Any) -> Any:
+        self.downloaded.append(message)
+        return kwargs.get("file")
 
     def add_event_handler(self, callback: Any, event: Any) -> None:
         self.handlers.append((callback, event))
 
     def remove_event_handler(self, callback: Any, event: Any | None = None) -> int:
+        """Identity-based, so a test can tell two equal callbacks apart."""
         before = len(self.handlers)
         if event is None:
             self.handlers = [item for item in self.handlers if item[0] is not callback]

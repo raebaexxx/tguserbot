@@ -203,6 +203,18 @@ Also fixed:
 
 ### Added
 
+- `sum` plugin: `/ub sum` summarises the last messages in the chat where the
+  command was typed, including voice notes and video messages. The mime types
+  were verified against the live model with real messages from the bot's own
+  chats -- a voice note is OGG/Opus and declares `audio/ogg`, a "кружок" is MP4 --
+  because a wrong mime type does not fail loudly, it just makes the model quietly
+  omit the attachment. Media is **off by default**: a summary sends other people's
+  messages to a third party. What did not fit the budget is listed in the reply
+  rather than dropped.
+- `userbot.gemini`: the Gemini client, moved out of the `ai` plugin so two plugins
+  can share one implementation of the parts that are awkward (a routine 503, the
+  `alt=sse` requirement, the `thoughtSignature` echo). `Part` now carries inline
+  media as well as text.
 - `userbot.messaging`: `edit_message` and `delete_message`, which work whether
   the object underneath is a telethon or a pyrogram message, and report failure
   instead of raising.

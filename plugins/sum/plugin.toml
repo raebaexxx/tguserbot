@@ -1,0 +1,40 @@
+name = "sum"
+version = "0.1.0"
+api = "1"
+entrypoint = "plugin:Plugin"
+description = "Summarises the last messages in a chat, including voice and video notes"
+schema_version = 1
+
+# Defaults, overridable in <data_dir>/plugin-config.toml:
+#
+#   [sum]
+#   message_count = 25
+#   include_media = false
+[config]
+#: How many messages to summarise when none is given.
+message_count = 10
+#: Upper bound on a count typed into the command, so one number cannot turn into
+#: an enormous request.
+max_message_count = 50
+
+#: Environment variables holding the API key, same as the `ai` plugin.
+api_key_env = "TGUSERBOT_GEMINI_API_KEY, TGUSERBOT_GEMINI_API_KEYS"
+chat_model = "gemini-3.8-flash"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+timeout_seconds = 180
+max_output_tokens = 2046
+
+#: Send voice notes, video messages, photos and audio to the model.
+#:
+#: Off by default, and the default is the point: this sends other people's
+#: messages to a third party. Turn it on for chats where that is acceptable.
+include_media = false
+
+#: Per-file and total byte caps. The API rejects oversized requests outright,
+#: so anything over this is skipped and reported rather than failing the command.
+max_media_bytes = 4194304
+max_total_media_bytes = 15728640
+
+#: Hard bound on the transcript, so a chat full of very long messages does not
+#: build a request that cannot be sent.
+max_transcript_chars = 24000

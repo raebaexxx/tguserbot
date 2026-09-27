@@ -429,15 +429,10 @@ async def test_a_handler_reply_reaches_the_topic(topics: Any) -> None:
         seen.append(handled.id)
         await handled.respond("pong")
 
-    class Client:
-        def add_event_handler(self, _cb: Any, _ev: Any) -> None:
-            pass
+    from conftest import FakeClient
 
-        def remove_event_handler(self, _cb: Any, _ev: Any = None) -> None:
-            pass
-
-        def is_connected(self) -> bool:
-            return True
+    class Client(FakeClient):
+        pass
 
     context = PluginContext(
         plugin_name="t",

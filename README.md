@@ -17,6 +17,8 @@ Git plugins are staged and activated manually.
 - an owner-only command dispatcher with per-command timeouts and cooldowns;
 - `notes`, `status`, and `echo` demo plugins, plus a `tiktok` downloader;
 - an `ai` plugin: Gemini chat, and plugin generation behind a two-step review;
+- a `sum` plugin: summarises the last messages in a chat, voice notes and
+  video messages included (media is off by default — it leaves this machine);
 - tests, CI gates, and deployment templates.
 
 ## Requirements
@@ -80,6 +82,20 @@ comments. The ones worth knowing:
 `owner_ids` is the whole authorisation surface of the bot, and the logged-in
 account is always added to it. Anyone able to use that account can manage
 plugins, so treat the session file as equivalent to the password.
+
+## Summarising a chat
+
+`/ub sum` summarises the last messages where you typed it, and `/ub sum 10 media`
+includes voice notes and video messages. The formats were checked against the live
+model with real messages from the bot's own chats rather than assumed: Telegram
+voice notes are OGG/Opus and arrive as `audio/ogg`, video messages are MP4.
+
+Media is **off by default**, and that default is the point: a summary sends other
+people's messages to a third party. Turn it on per-plugin in
+`plugin-config.toml` with `[sum] include_media = true`, and the reply then says how
+many attachments were sent. Anything that did not fit the size budget is listed
+under "Не учтено" rather than dropped — a summary that quietly ignores half a
+conversation is worse than one that admits it. See `docs/sum-plugin.md`.
 
 ## Plugin layout
 

@@ -164,7 +164,7 @@ def test_the_docs_say_where_the_key_belongs() -> None:
 
 def test_no_key_leaks_through_the_client(files: list[Path]) -> None:
     """The client must scrub keys from anything it puts in front of a user."""
-    client = (REPO_ROOT / "plugins" / "ai" / "_client.py").read_text(encoding="utf-8")
+    client = (REPO_ROOT / "src" / "userbot" / "gemini.py").read_text(encoding="utf-8")
     assert "_redact" in client
     assert "<redacted>" in client
     # And the key is a header, never a query parameter the URL could log.

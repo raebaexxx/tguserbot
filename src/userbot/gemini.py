@@ -1,5 +1,9 @@
 """A small Gemini client: chat, streaming, retries and key rotation.
 
+Shared by the plugins that talk to Gemini -- ``ai`` for conversation and ``sum``
+for summarising a chat -- so the awkward parts of the API are documented and
+implemented once rather than in every plugin that needs them.
+
 Deliberately thin. The REST surface is one POST per call, and a full SDK would
 add a dependency and a second opinion about retries, timeouts and error shapes
 for something this small. Everything awkward about talking to this API was
@@ -37,7 +41,7 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("userbot.plugin.ai.client")
+logger = logging.getLogger("userbot.gemini")
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -65,13 +69,30 @@ class MissingKeyError(GeminiError):
 
 @dataclass(slots=True)
 class Part:
-    """One piece of a message, with the signature needed to continue a turn."""
+    """One piece of a message.
+
+    Either text, or an inline attachment. Inline data is how audio and video
+    reach the model, and it has to be base64 -- which is why the mime type and
+    the encoded bytes are carried together here rather than left to each caller
+    to shape correctly.
+    """
 
     text: str
     thought_signature: str | None = None
+    #: ``{"mime_type": ..., "data": <base64 str>}`` for an attachment.
+    inline_data: dict[str, str] | None = None
+
+    @classmethod
+    def media(cls, mime: str, base64_data: str) -> Part:
+        return cls(text="", inline_data={"mime_type": mime, "data": base64_data})
 
     def to_wire(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"text": self.text}
+        if self.inline_data is not None:
+            payload: dict[str, Any] = {"inline_data": dict(self.inline_data)}
+            if self.thought_signature:
+                payload["thoughtSignature"] = self.thought_signature
+            return payload
+        payload = {"text": self.text}
         if self.thought_signature:
             payload["thoughtSignature"] = self.thought_signature
         return payload
@@ -97,13 +118,26 @@ class Turn:
         for raw in payload.get("parts") or []:
             if not isinstance(raw, dict):
                 continue
+            signature = raw.get("thoughtSignature")
+            marker = signature if isinstance(signature, str) else None
+            inline = raw.get("inline_data") or raw.get("inlineData")
+            if isinstance(inline, dict):
+                # Model replies come back with attachments too; keeping them
+                # means a history round-trips without losing the media.
+                mime = inline.get("mime_type") or inline.get("mimeType") or ""
+                data = inline.get("data")
+                parts.append(
+                    Part(
+                        text="",
+                        thought_signature=marker,
+                        inline_data={"mime_type": str(mime), "data": str(data or "")},
+                    )
+                )
+                continue
             text = raw.get("text")
             if not isinstance(text, str):
                 continue
-            signature = raw.get("thoughtSignature")
-            parts.append(
-                Part(text=text, thought_signature=signature if isinstance(signature, str) else None)
-            )
+            parts.append(Part(text=text, thought_signature=marker))
         return cls(role=str(payload.get("role") or "user"), parts=parts)
 
 

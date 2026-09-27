@@ -20,12 +20,7 @@ import json
 import logging
 from typing import Any
 
-from userbot.messaging import delete_message, edit_message
-from userbot.plugin_api import Plugin as BasePlugin
-from userbot.plugin_api import PluginContext
-from userbot.safety import format_findings, read_tree_sources, review_tree
-
-from ._client import (
+from userbot.gemini import (
     DEFAULT_BASE_URL,
     GeminiClient,
     GeminiError,
@@ -34,6 +29,11 @@ from ._client import (
     Turn,
     keys_from_env,
 )
+from userbot.messaging import delete_message, edit_message
+from userbot.plugin_api import Plugin as BasePlugin
+from userbot.plugin_api import PluginContext
+from userbot.safety import format_findings, read_tree_sources, review_tree
+
 from ._codegen import (
     PLUGIN_SCHEMA,
     GeneratedFileError,
