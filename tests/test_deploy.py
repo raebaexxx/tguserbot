@@ -344,3 +344,64 @@ def test_env_examples_document_the_new_knobs() -> None:
         "TGUSERBOT_MIN_INTERVAL",
     ):
         assert key in text, f".env.example is missing {key}"
+
+
+# --- dependency locking ----------------------------------------------------
+
+LOCK = REPO_ROOT / "requirements.lock"
+UV_LOCK = REPO_ROOT / "uv.lock"
+
+
+def test_lock_carries_hashes() -> None:
+    """The deploy path installs from this file as root, so the bytes matter."""
+    text = LOCK.read_text(encoding="utf-8")
+    assert "--hash=sha256:" in text, "requirements.lock must pin hashes"
+    requirements = [line for line in text.splitlines() if line and not line.startswith((" ", "#"))]
+    assert requirements, "the lock is empty"
+    assert all(re.match(r"^[A-Za-z0-9_.-]+==", line) for line in requirements), requirements
+
+
+def test_lock_omits_the_project() -> None:
+    """A local directory cannot be hashed, so --require-hashes would reject it."""
+    text = LOCK.read_text(encoding="utf-8")
+    assert not re.search(r"^-e ", text, re.M), "the lock must not contain an editable install"
+    assert not re.search(r"^\. ", text, re.M)
+
+
+def test_every_pinned_dependency_has_a_hash() -> None:
+    text = LOCK.read_text(encoding="utf-8")
+    for match in re.finditer(r"^([A-Za-z0-9_.-]+)==(\S+)", text, re.M):
+        name = match.group(1)
+        tail = text[match.end() :]
+        next_requirement = re.search(r"^[A-Za-z0-9_.-]+==", tail, re.M)
+        block = tail[: next_requirement.start()] if next_requirement else tail
+        assert "--hash=sha256:" in block, f"{name} has no hash"
+
+
+def test_install_scripts_install_hashed_deps_and_the_project_separately() -> None:
+    """--require-hashes rejects an un-hashed -e . line, so the two steps are
+    separate everywhere the lock is consumed."""
+    for script in (CTL, INSTALL):
+        text = script.read_text(encoding="utf-8")
+        assert "--require-hashes" in text, script.name
+        assert "--no-deps" in text, f"{script.name} must install the project with --no-deps"
+        # The plain editable install of the whole project must not stand alone
+        # next to a hashed requirements file.
+        assert not re.search(r"pip install -r requirements\.lock(?!\s|$)", text), script.name
+
+
+def test_uv_lock_is_in_sync_with_pyproject() -> None:
+    """Regression: four dev dependencies were added to pyproject.toml while
+    uv.lock kept the old resolution, so `uv sync` produced a different
+    environment from the one CI installs."""
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    uv_lock = UV_LOCK.read_text(encoding="utf-8")
+    dev_block = re.search(r"dev = \[(.*?)\]", pyproject, re.S)
+    assert dev_block, "no dev extras in pyproject.toml"
+    for line in dev_block.group(1).splitlines():
+        name = re.match(r'\s*"([A-Za-z0-9_.-]+)', line)
+        if not name:
+            continue
+        assert f'name = "{name.group(1)}"' in uv_lock, (
+            f"{name.group(1)} is in pyproject dev extras but not in uv.lock; run `uv lock`"
+        )

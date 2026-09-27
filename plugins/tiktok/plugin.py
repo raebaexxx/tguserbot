@@ -46,7 +46,7 @@ SOCKET_TIMEOUT = 20
 RETRIES = 3
 
 #: TikTok rejects requests that do not look like a browser. ``curl-cffi`` is a
-#: hard dependency for exactly this; without ``impersonate`` the extractor is
+#: hard dependency for exactly this; without impersonation the extractor is
 #: routinely served a challenge page instead of the video.
 IMPERSONATE_TARGET = "chrome"
 
@@ -166,6 +166,25 @@ def extract_tiktok_url(
     return url
 
 
+def _impersonate_target() -> Any:
+    """Resolve the impersonation target, or ``None`` when it is unavailable.
+
+    yt-dlp accepts an ``ImpersonateTarget`` here, not the string form: the
+    string-to-enum conversion lives in its CLI entry point, which this plugin
+    does not use. Passing a plain string reaches ``is_supported_target`` and
+    raises ``AssertionError`` from inside ``YoutubeDL.__init__`` -- so every
+    download would fail, not just impersonation.
+    """
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+    except ImportError:
+        return None
+    try:
+        return ImpersonateTarget.from_str(IMPERSONATE_TARGET)
+    except Exception:
+        return None
+
+
 class Plugin(BasePlugin):
     def __init__(self) -> None:
         self.ctx: PluginContext | None = None
@@ -173,6 +192,7 @@ class Plugin(BasePlugin):
         self.progress_lock: asyncio.Lock | None = None
         self.max_file_size: int = DEFAULT_MAX_FILE_MIB * 1024 * 1024
         self.allowed_domains: tuple[str, ...] = DEFAULT_ALLOWED_DOMAINS
+        self._temporary_dir: Path = Path(".")
 
     async def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -334,22 +354,25 @@ class Plugin(BasePlugin):
 
         return progress_hook
 
-    def _download_sync(
-        self,
-        url: str,
-        temporary_dir: Path,
-        progress_hook: Any,
-    ) -> Path:
+    def build_options(self, progress_hook: Any) -> dict[str, Any]:
+        """Build the yt-dlp option mapping.
+
+        Split out from :meth:`_download_sync` so the mapping can be validated in
+        tests without touching the network. yt-dlp silently accepts unknown keys
+        and stores them in ``params``, so a typo is invisible until a download
+        misbehaves; ``tests/test_tiktok.py`` therefore checks the keys against
+        yt-dlp's real option set and constructs a real ``YoutubeDL`` with them.
+        """
         # Imported here so a broken yt-dlp install cannot stop the whole userbot
-        # from booting. Note that yt-dlp's own plugin scanner is never invoked
-        # on the library path (load_all_plugins() is CLI-only), so no
+        # from booting. Note that yt-dlp's own plugin scanner is never invoked on
+        # the library path (load_all_plugins() is CLI-only), so no
         # YTDLP_NO_PLUGINS / plugin_dirs juggling is needed or wanted -- setting
         # process-wide env from a worker thread was a side effect on every other
         # plugin.
-        from yt_dlp import YoutubeDL
+        from yt_dlp import YoutubeDL  # noqa: F401  (validated by the caller)
 
         options: dict[str, Any] = {
-            "outtmpl": str(temporary_dir / "video.%(ext)s"),
+            "outtmpl": str(self._temporary_dir / "video.%(ext)s"),
             "format": "best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "noplaylist": True,
@@ -367,12 +390,30 @@ class Plugin(BasePlugin):
             "continuedl": False,
             "overwrites": True,
             "progress_hooks": [progress_hook],
-            "impersonate": IMPERSONATE_TARGET,
             "http_headers": {"User-Agent": USER_AGENT},
             "logger": _YDLLogger(
                 self.ctx.logger if self.ctx else logging.getLogger("userbot.plugin.tiktok")
             ),
         }
+        target = _impersonate_target()
+        if target is not None:
+            options["impersonate"] = target
+        elif self.ctx is not None:
+            self.ctx.logger.warning(
+                "yt-dlp impersonation is unavailable; TikTok downloads may fail. Install curl-cffi."
+            )
+        return options
+
+    def _download_sync(
+        self,
+        url: str,
+        temporary_dir: Path,
+        progress_hook: Any,
+    ) -> Path:
+        from yt_dlp import YoutubeDL
+
+        self._temporary_dir = temporary_dir
+        options = self.build_options(progress_hook)
         # yt-dlp types its options as a private TypedDict, so a plain dict of
         # runtime values cannot be passed without a cast.
         with YoutubeDL(cast(Any, options)) as downloader:

@@ -59,19 +59,23 @@ fetch_code() {
 }
 
 install_dependencies() {
-  if [[ ! -x "${APP_DIR}/.venv/bin/python" ]]; then
+  local python="${APP_DIR}/.venv/bin/python"
+  if [[ ! -x "${python}" ]]; then
     log "creating the virtualenv"
     runuser -u "${SERVICE_USER}" -- python3 -m venv "${APP_DIR}/.venv"
-    runuser -u "${SERVICE_USER}" -- "${APP_DIR}/.venv/bin/python" -m pip install --upgrade pip
+    runuser -u "${SERVICE_USER}" -- "${python}" -m pip install --upgrade pip
   fi
   # Only the venv is chowned back: the rest of the tree stays root-owned.
   chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.venv"
   if [[ -f "${APP_DIR}/requirements.lock" ]]; then
-    runuser -u "${SERVICE_USER}" -- bash -c \
-      "cd '${APP_DIR}' && '${APP_DIR}/.venv/bin/python' -m pip install -r requirements.lock"
+    # The lock carries hashes and omits the project itself (a local directory
+    # cannot be hashed), so dependencies are verified and the project is
+    # installed separately without touching the resolver.
+    runuser -u "${SERVICE_USER}" -- "${python}" -m pip install \
+      --require-hashes -r "${APP_DIR}/requirements.lock"
+    runuser -u "${SERVICE_USER}" -- "${python}" -m pip install --no-deps -e "${APP_DIR}"
   else
-    runuser -u "${SERVICE_USER}" -- \
-      "${APP_DIR}/.venv/bin/python" -m pip install -e "${APP_DIR}"
+    runuser -u "${SERVICE_USER}" -- "${python}" -m pip install -e "${APP_DIR}"
   fi
 }
 

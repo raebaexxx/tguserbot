@@ -158,6 +158,17 @@ log_file_path() {
   printf '%s' "${log_dir}/userbot.log"
 }
 
+install_project() {
+  # The lock carries hashes and omits the project itself, so dependencies are
+  # installed with verification and the project separately with --no-deps.
+  if [[ -f "${APP_DIR}/requirements.lock" ]]; then
+    "${PYTHON}" -m pip install --require-hashes -r "${APP_DIR}/requirements.lock"
+    "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}"
+  else
+    "${PYTHON}" -m pip install -e "${APP_DIR}"
+  fi
+}
+
 install_system() {
   require_root_for_system setup
   if is_system_mode; then
@@ -169,11 +180,7 @@ install_system() {
     }
     python3 -m venv "${APP_DIR}/.venv"
     "${PYTHON}" -m pip install --upgrade pip
-    if [[ -f "${APP_DIR}/requirements.lock" ]]; then
-      (cd "${APP_DIR}" && "${PYTHON}" -m pip install -r requirements.lock)
-    else
-      "${PYTHON}" -m pip install -e "${APP_DIR}"
-    fi
+    install_project
   fi
 }
 
@@ -274,8 +281,9 @@ update_code() {
     previous="$(git -C "${APP_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.venv" 2>/dev/null || true
     run_as_service_user git -C "${APP_DIR}" pull --ff-only
-    run_as_service_user bash -c \
-      "cd '${APP_DIR}' && '${PYTHON}' -m pip install -r requirements.lock"
+    run_as_service_user "${PYTHON}" -m pip install \
+      --require-hashes -r "${APP_DIR}/requirements.lock"
+    run_as_service_user "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}"
     if systemctl_cmd restart "${SERVICE_NAME}"; then
       sleep 3
       if health_check; then
@@ -284,8 +292,7 @@ update_code() {
         echo "Health check failed after updating to $(git -C "${APP_DIR}" rev-parse --short HEAD)." >&2
         echo "Rolling back to ${previous}." >&2
         run_as_service_user git -C "${APP_DIR}" checkout --quiet "${previous}"
-        run_as_service_user bash -c \
-          "cd '${APP_DIR}' && '${PYTHON}' -m pip install -r requirements.lock"
+        run_as_service_user "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}"
         systemctl_cmd restart "${SERVICE_NAME}" || true
         exit 1
       fi
@@ -297,7 +304,7 @@ update_code() {
     fi
   else
     git -C "${APP_DIR}" pull --ff-only
-    (cd "${APP_DIR}" && "${PYTHON}" -m pip install -r requirements.lock)
+    install_project
   fi
 }
 

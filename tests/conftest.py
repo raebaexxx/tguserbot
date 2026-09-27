@@ -7,12 +7,15 @@ the working directory and of how many demo plugins the repository ships.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import shutil
 import tempfile
 import textwrap
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +24,7 @@ from userbot.commands import CommandDispatcher
 from userbot.config import Settings
 from userbot.health import HealthService
 from userbot.manager import PluginManager
+from userbot.plugin_config import PluginConfig
 from userbot.rate_limit import RateLimiter
 from userbot.storage import Storage
 
@@ -118,6 +122,31 @@ def make_slow_stop_plugin(command: str = "demo", delay: float = 5.0) -> str:
             async def stop(self):
                 await asyncio.sleep({delay})
     """
+
+
+@dataclass
+class FakeContext:
+    """The slice of ``PluginContext`` that plugins actually touch."""
+
+    def __init__(self) -> None:
+        self.logger = logging.getLogger("test.plugin")
+        self.rate_limiter = RateLimiter(min_interval=0)
+        self.client = SimpleNamespace()
+        self.commands: list[str] = []
+        self.handlers: list[object] = []
+        self.config = PluginConfig(plugin_name="test")
+
+    def register_command(self, name: str, callback: Any, **kwargs: Any) -> None:
+        self.commands.append(name)
+
+    def register_handler(self, callback: Any, event: Any) -> None:
+        self.handlers.append((callback, event))
+
+    def is_owner(self, sender_id: int | None) -> bool:
+        return sender_id == 1
+
+    def spawn(self, coroutine: Any, *, name: str | None = None) -> Any:
+        return asyncio.ensure_future(coroutine)
 
 
 @dataclass
@@ -261,6 +290,26 @@ def real_plugin_dir() -> Iterator[Path]:
         yield target / "plugins"
     finally:
         shutil.rmtree(target, ignore_errors=True)
+
+
+def load_shipped_plugin(name: str, generation: int = 1) -> Any:
+    """Load a plugin straight from the repository's ``plugins/`` directory.
+
+    Tests that assert on shipped code (option mappings, manifests) read the real
+    files rather than a copy, so a local edit cannot be masked by a stale
+    fixture. Callers must call ``cleanup_loaded_plugin`` when done.
+    """
+    from userbot.loader import load_plugin
+
+    return load_plugin(REAL_PLUGINS_DIR / name, name, generation)
+
+
+def shipped_module(name: str, generation: int = 1) -> tuple[Any, Any]:
+    """Return ``(LoadedPlugin, module)`` for a shipped plugin."""
+    loaded = load_shipped_plugin(name, generation)
+    import sys
+
+    return loaded, sys.modules[f"{loaded.module.__name__}.plugin"]
 
 
 PluginFactory = Callable[..., Path]
