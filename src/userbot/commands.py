@@ -11,6 +11,8 @@ from typing import Any
 
 from telethon import events
 
+from .topics import TopicAwareEvent
+
 #: Telegram rejects text messages longer than this.
 MAX_MESSAGE_LENGTH = 4096
 
@@ -273,6 +275,11 @@ class CommandDispatcher:
         return (match.group("body") or "").strip()
 
     async def handle_event(self, event: Any) -> None:
+        # Wrapped once, here, before any of the early replies below. Anything
+        # that answers before the command is even resolved -- an unknown
+        # command, a cooldown -- is still a reply, and it still belongs in the
+        # topic the question was asked in.
+        event = TopicAwareEvent(event)
         sender_id = getattr(event, "sender_id", None)
         if sender_id not in self.owner_ids:
             return
@@ -302,7 +309,10 @@ class CommandDispatcher:
         self._running.add(key)
         try:
             raw = getattr(event, "raw_text", "") or ""
-            await self._invoke(registration, CommandContext(registration.name, args, raw, event))
+            await self._invoke(
+                registration,
+                CommandContext(registration.name, args, raw, event),
+            )
         finally:
             self._running.discard(key)
 

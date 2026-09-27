@@ -26,6 +26,16 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
 ### Fixed
 
+- **Every `/ub ...` command answered in the main thread, even when written inside
+  a forum topic.** Telegram carries the thread on the message's reply header, and
+  telethon 1.45 reads it and then drops it: both `send_message` and `send_file`
+  build `InputReplyToMessage(reply_to)` from a single integer, so `top_msg_id`
+  never reaches Telegram. There is no public telethon call that targets a topic,
+  so `userbot.topics` builds the request itself and wraps both reply paths --
+  commands in the dispatcher, and raw event handlers in `PluginContext`, which is
+  how the `echo` plugin's "pong" was also landing in the wrong place. Anything
+  beyond a plain text message is passed to telethon untouched, rather than partly
+  handled and partly dropped.
 - **`/ub ai <question>` sent the placeholder and then nothing.** Every delivery
   path went through `placeholder.edit_text()` -- the progress updates, the final
   answer, and even the "the model returned no text" notice -- so when the

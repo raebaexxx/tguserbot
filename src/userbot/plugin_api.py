@@ -13,6 +13,7 @@ from .protocols import EventDispatcher, PluginHost, TelegramClientLike
 from .rate_limit import RateLimiter
 from .storage import PluginStorage, Storage
 from .task_registry import TaskGroup
+from .topics import TopicAwareEvent
 
 #: Lifecycle hooks a plugin may implement. ``setup`` receives the context.
 LIFECYCLE_HOOKS = ("migrate", "setup", "start", "stop")
@@ -224,7 +225,11 @@ class PluginContext:
     def _guard(self, callback: Any) -> Any:
         async def guarded(event: Any) -> None:
             try:
-                result = callback(event)
+                # Wrapped here as well as in the dispatcher: a handler gets the
+                # raw Telethon event, so without this a plugin replying from
+                # ctx.register_handler would land in the chat's main thread even
+                # in a forum topic. One wrapper for every path a reply can take.
+                result = callback(TopicAwareEvent(event))
                 if inspect.isawaitable(result):
                     await result
             except asyncio.CancelledError:

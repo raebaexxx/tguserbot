@@ -174,6 +174,18 @@ ignores case and an optional `.git` suffix. Each plugin keeps the three most
 recently fetched revisions, so `/ub plugin update <name> <commit>` is also the
 rollback path.
 
+Replies stay in the forum topic they were asked in. Telegram carries the thread
+on the message's reply header, and telethon 1.45 reads it and then drops it --
+`send_message` and `send_file` both build `InputReplyToMessage(reply_to)` from a
+single integer, so `top_msg_id` never reaches Telegram and every reply would
+land in the main thread. `userbot.topics` builds the request with the topic set,
+and both reply paths are wrapped: commands in the dispatcher, and raw event
+handlers in `PluginContext`. Plugins need do nothing; `event.underlying` reaches
+the real event for code that needs it. Calls using anything beyond plain text --
+`silent`, buttons, `schedule` -- are passed to telethon untouched, because a
+bot that quietly drops an argument is worse than one that answers in the wrong
+thread.
+
 `/ub plugin adopt <name>` installs a plugin that was generated into the staging
 area (by `/ub ai new`, see below). Generation only ever writes to
 `<data_dir>/plugin-staging/`, which is not a plugin root, so nothing it produced
