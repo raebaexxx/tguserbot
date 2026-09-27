@@ -14,6 +14,7 @@ dependencies = [
     "telethon==1.45.0",
     "yt-dlp==2026.8.19",
     "curl-cffi==0.16.3",
+    "httpx>=0.28,<1",
 ]
 
 [project.optional-dependencies]

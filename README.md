@@ -16,6 +16,7 @@ Git plugins are staged and activated manually.
 - a local plugin watcher that quiesces instead of interrupting a reload;
 - an owner-only command dispatcher with per-command timeouts and cooldowns;
 - `notes`, `status`, and `echo` demo plugins, plus a `tiktok` downloader;
+- an `ai` plugin: Gemini chat, and plugin generation behind a two-step review;
 - tests, CI gates, and deployment templates.
 
 ## Requirements
@@ -73,6 +74,7 @@ comments. The ones worth knowing:
 | `TGUSERBOT_COMMAND_TIMEOUT` | `120` | Seconds a `/ub` command may run before it is reported as timed out. |
 | `TGUSERBOT_LOG_JSON` | `0` | Set to `1` for one JSON object per log line. |
 | `TGUSERBOT_ALERT_CHAT` | empty | Chat ID to notify when the service dies and systemd stops restarting it. |
+| `TGUSERBOT_GEMINI_API_KEY` | empty | API key for the `ai` plugin. Comma-separate several to rotate through them. |
 | `TGUSERBOT_GIT_ALLOWED_REPOS` | empty | Exact repository URLs accepted by the Git plugin source. |
 
 `owner_ids` is the whole authorisation surface of the bot, and the logged-in

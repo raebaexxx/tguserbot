@@ -52,6 +52,20 @@ class PluginConfig:
                 f"plugin {self.plugin_name!r}: {key!r} must be a number, got {raw!r}"
             ) from exc
 
+    def float_value(self, key: str, default: float) -> float:
+        raw = self.values.get(key, default)
+        if isinstance(raw, bool):
+            # bool is an int subclass, so True would silently become 1.0 here.
+            raise PluginConfigError(
+                f"plugin {self.plugin_name!r}: {key!r} must be a number, got {raw!r}"
+            )
+        try:
+            return float(raw)
+        except (TypeError, ValueError) as exc:
+            raise PluginConfigError(
+                f"plugin {self.plugin_name!r}: {key!r} must be a number, got {raw!r}"
+            ) from exc
+
     def bool_value(self, key: str, default: bool) -> bool:
         raw = self.values.get(key, default)
         if isinstance(raw, bool):

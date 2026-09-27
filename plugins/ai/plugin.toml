@@ -1,0 +1,42 @@
+name = "ai"
+version = "0.1.0"
+api = "1"
+entrypoint = "plugin:Plugin"
+description = "Gemini chat and on-demand plugin generation"
+schema_version = 1
+
+# Defaults, overridable in <data_dir>/plugin-config.toml:
+#
+#   [ai]
+#   chat_model = "gemini-3.8-flash"
+[config]
+#: Environment variables holding the API key. The first one with a value wins.
+#: Comma-separated, so several keys can be rotated through on a rate limit.
+api_key_env = "TGUSERBOT_GEMINI_API_KEY, TGUSERBOT_GEMINI_API_KEYS"
+
+#: Models. gemini-3.8-flash is the default because it is a GA model on the free
+#: tier; gemini-3.1-pro-preview is the deep-reasoning option and is not free, so
+#: it is only reached through an explicit /ub ai pro.
+chat_model = "gemini-3.8-flash"
+code_model = "gemini-3.8-flash"
+fast_model = "gemini-3.5-flash-lite"
+pro_model = "gemini-3.1-pro-preview"
+
+#: Self-hosted or proxied endpoints are supported: only the base URL changes.
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+timeout_seconds = 120
+max_output_tokens = 4096
+code_output_tokens = 16384
+
+#: Seconds of conversation kept. Each turn is resent, so this is the real cost
+#: driver, not the number of messages.
+max_history_turns = 20
+
+#: Floor between progress edits. Telegram throttles aggressive editors, and an
+#: edit every token is exactly how that gets earned.
+min_edit_interval = 3.0
+
+#: Ask before generating. Off by default because generation only ever writes to
+#: the staging directory, which cannot load anything on its own.
+require_confirm = true

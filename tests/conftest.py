@@ -128,13 +128,22 @@ def make_slow_stop_plugin(command: str = "demo", delay: float = 5.0) -> str:
 class FakeContext:
     """The slice of ``PluginContext`` that plugins actually touch."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        config: PluginConfig | None = None,
+    ) -> None:
         self.logger = logging.getLogger("test.plugin")
         self.rate_limiter = RateLimiter(min_interval=0)
         self.client = SimpleNamespace()
         self.commands: list[str] = []
         self.handlers: list[object] = []
-        self.config = PluginConfig(plugin_name="test")
+        self.settings = settings
+        self.config = config if config is not None else PluginConfig(plugin_name="test")
+        #: Plugins that never touch the database leave this alone; the ones that
+        #: do replace it. Typed loosely because a test's fake need not be.
+        self.storage: Any = None
 
     def register_command(self, name: str, callback: Any, **kwargs: Any) -> None:
         self.commands.append(name)
@@ -381,6 +390,29 @@ def shipped_module(name: str, generation: int = 1) -> tuple[Any, Any]:
     import sys
 
     return loaded, sys.modules[f"{loaded.module.__name__}.plugin"]
+
+
+def shipped_submodule(name: str, submodule: str, generation: int = 1) -> tuple[Any, Any]:
+    """Load a shipped plugin and return one of its private submodules.
+
+    A plugin that splits its logic into ``_client.py``-style modules deserves the
+    same coverage as the entry point, and importing it through the real loader is
+    what proves the relative import works at runtime rather than only in tests.
+    """
+    import importlib
+
+    loaded = load_shipped_plugin(name, generation)
+    module = importlib.import_module(f"{loaded.module.__name__}.{submodule}")
+    return loaded, module
+
+
+def plugin_config(values: dict[str, Any] | None = None, name: str = "test") -> PluginConfig:
+    """A ``PluginConfig`` carrying real values.
+
+    ``PluginConfig`` is frozen, so a test that needs an override has to build a
+    new one rather than assign into the mapping.
+    """
+    return PluginConfig(plugin_name=name, values=dict(values or {}))
 
 
 PluginFactory = Callable[..., Path]

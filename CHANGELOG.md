@@ -4,6 +4,32 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
+## [Unreleased]
+
+### Added
+
+- `ai` plugin: Gemini chat with a persisted conversation, plus on-demand plugin
+  generation. Streaming is throttled to one edit per `min_edit_interval` seconds,
+  because Telegram counts message edits and the earlier edit-per-callback
+  reporter in the tiktok plugin caused a real rate-limit incident.
+- Plugin generation writes **only** to `<data_dir>/plugin-staging/`, which is not a
+  plugin root, so nothing a model produces can run until the owner types
+  `/ub plugin adopt <name>`. Adoption runs a static review and refuses a plugin
+  that reaches for a shell, a socket, a native library, or the session file.
+- `safety.py`: an AST review of plugin source. A denylist, not a sandbox, and it
+  says so in the docstring.
+- `installed_plugin_dir` joins `plugin_dir` as a plugin root, under the writable
+  data directory. Writing adopted plugins into the shipped tree would work in
+  development and fail in production, where `ProtectSystem=strict` makes it
+  read-only.
+- `PluginConfig.float_value`, for settings that are not whole numbers.
+
+### Fixed
+
+- A staged plugin path of `../x.py` or an absolute path is now rejected before
+  anything is written, and the resolved location is re-checked against the
+  staging root afterwards.
+
 ## [0.2.0] - 2026-09-27
 
 ### Fixed

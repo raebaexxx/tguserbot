@@ -51,12 +51,15 @@ DOCUMENTED_ENV_VARS = {
     "TGUSERBOT_MIN_INTERVAL",
     "TGUSERBOT_GIT_ALLOWED_REPOS",
     "TGUSERBOT_ALERT_CHAT",
+    "TGUSERBOT_GEMINI_API_KEY",
 }
 
-#: Settings consumed by the shell helpers rather than by Python. They must still
-#: be documented, and they are read through `sed` on the environment file, so no
-#: Python-level scan can see them.
-SHELL_SETTINGS = {"TGUSERBOT_ALERT_CHAT"}
+#: Settings that no ``Settings`` field backs, because they are consumed somewhere
+#: else. They must still be documented, but a Python-level scan cannot see them.
+#:
+#: ``alert.sh`` reads the environment file with ``sed``; the plugins read their
+#: own keys by name, from whatever variable the manifest points at.
+SHELL_SETTINGS = {"TGUSERBOT_ALERT_CHAT", "TGUSERBOT_GEMINI_API_KEY"}
 
 
 def test_env_example_covers_every_documented_variable() -> None:
@@ -67,11 +70,12 @@ def test_env_example_covers_every_documented_variable() -> None:
 
 def test_every_env_var_the_code_reads_is_documented() -> None:
     """Regression: a new knob that only exists in code is a trap for operators."""
-    code = "\n".join(
-        read(path)
-        for path in (REPO_ROOT / "src" / "userbot").glob("*.py")
-        if path.name != "config.py"
-    )
+    sources = [path for path in (REPO_ROOT / "src" / "userbot").glob("*.py")]
+    # A plugin may read its own settings by name, so it is scanned too. Without
+    # this, TGUSERBOT_GEMINI_API_KEY would be in code and in the README but no
+    # test would ever connect the two.
+    sources += [path for path in (REPO_ROOT / "plugins").rglob("*.py")]
+    code = "\n".join(read(path) for path in sources if path.name != "config.py")
     used = set(re.findall(r"TGUSERBOT_[A-Z_]+", code)) | set(
         re.findall(r'env\.get\("([A-Z_]+)"', read(REPO_ROOT / "src" / "userbot" / "config.py"))
     )
@@ -313,10 +317,18 @@ def test_changelog_heading_matches_the_package_version() -> None:
     first = _re.search(r"^## \[([^\]]+)\]", text, _re.M)
     assert first, "no release heading in the changelog"
     heading = first.group(1)
-    assert heading != "Unreleased", (
-        f"the changelog still has an Unreleased section but the version is {__version__}"
-    )
-    assert __version__ in heading, f"changelog head is {heading!r} but pyproject says {__version__}"
+    if heading == "Unreleased":
+        # Work in progress is legitimate. The newest *released* heading must
+        # still be the version the package reports, or a release note is lost.
+        released = _re.findall(r"^## \[([^\]]+)\]", text, _re.M)[1:]
+        assert released, "an Unreleased section with nothing released under it"
+        assert __version__ in released[0], (
+            f"the newest released heading is {released[0]!r} but pyproject says {__version__}"
+        )
+    else:
+        assert __version__ in heading, (
+            f"changelog head is {heading!r}, pyproject says {__version__}"
+        )
 
 
 def test_changelog_documents_the_data_migration() -> None:
