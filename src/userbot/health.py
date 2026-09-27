@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 #: Keep the per-plugin error ring buffer bounded; ``/ub status`` only needs a
@@ -30,6 +31,7 @@ class HealthService:
     last_error: str | None = None
     last_error_at: float | None = None
     plugin_errors: dict[str, PluginError] = field(default_factory=dict)
+    heartbeat_path: Path | None = None
 
     def mark_error(self, error: str | None, *, plugin: str | None = None) -> None:
         """Record or clear an error.
@@ -63,11 +65,10 @@ class HealthService:
         self.authorized = authorized
 
     def heartbeat_age_seconds(self) -> float | None:
-        path = getattr(self, "_heartbeat_path", None)
-        if path is None:
+        if self.heartbeat_path is None:
             return None
         try:
-            return round(time.time() - path.stat().st_mtime, 1)
+            return round(time.time() - self.heartbeat_path.stat().st_mtime, 1)
         except OSError:
             return None
 
@@ -84,6 +85,7 @@ class HealthService:
             "authorized": self.authorized,
             "watcher_running": self.watcher_running,
             "reload_count": self.reload_count,
+            "heartbeat_age_seconds": self.heartbeat_age_seconds(),
             "last_error": self.last_error,
             "last_error_age_seconds": (
                 None if self.last_error_at is None else round(now - self.last_error_at, 1)

@@ -37,11 +37,13 @@ class PluginWatcher:
         *,
         interval: float = 2.0,
         debounce: float = 0.5,
+        quiesce_timeout: float = 20.0,
     ):
         self.manager = manager
         self.plugin_dir = plugin_dir
         self.interval = max(0.1, interval)
         self.debounce = max(0.0, debounce)
+        self.quiesce_timeout = quiesce_timeout
         self._task: asyncio.Task[None] | None = None
         self._snapshot: dict[str, _Entry] = {}
         self._stopping = asyncio.Event()
@@ -140,9 +142,7 @@ class PluginWatcher:
         self.manager.health.watcher_running = False
         if task is None:
             return
-        budget = (
-            self.manager._shutdown_timeout if quiesce_timeout is None else quiesce_timeout
-        )
+        budget = self.quiesce_timeout if quiesce_timeout is None else quiesce_timeout
         if not await self.manager.wait_idle(budget):
             self.manager.logger.warning(
                 "plugin operations did not settle within %.1fs; forcing the watcher to stop",

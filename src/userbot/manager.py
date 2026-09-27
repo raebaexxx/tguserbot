@@ -22,6 +22,13 @@ DEFAULT_SHUTDOWN_TIMEOUT = 25.0
 GIT_KEEP_REVISIONS = 3
 
 
+def _revision_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 @dataclass(slots=True)
 class PluginRuntime:
     manifest: Any
@@ -90,9 +97,7 @@ class PluginManager:
         except OSError:
             self.logger.warning("cannot read the plugin directory %s", plugin_dir)
             return []
-        return [
-            path.name for path in entries if path.is_dir() and (path / "plugin.toml").is_file()
-        ]
+        return [path.name for path in entries if path.is_dir() and (path / "plugin.toml").is_file()]
 
     def _known_names(self) -> set[str]:
         return set(self._scan_local_names()) | set(self._runtimes)
@@ -272,9 +277,10 @@ class PluginManager:
                 loaded = await asyncio.to_thread(load_plugin, path, name, self._generation)
                 validate_plugin_interface(loaded.instance)
                 context = await self._build_context(
-                    name=name, path=path, instance=loaded.instance, logger=get_logger(
-                        f"plugin.{name}"
-                    )
+                    name=name,
+                    path=path,
+                    instance=loaded.instance,
+                    logger=get_logger(f"plugin.{name}"),
                 )
                 await context.prepare(loaded.manifest.schema_version)
                 if old is not None:
@@ -427,8 +433,8 @@ class PluginManager:
     async def enable(self, name: str) -> PluginRuntime | None:
         if name in self._env_disabled:
             raise PluginLoadError(
-                f"Plugin {name!r} is disabled by TGUSERBOT_DISABLED_PLUGINS; "
-                "remove it from that setting first"
+                f"Плагин {name!r} выключен в TGUSERBOT_DISABLED_PLUGINS; "
+                "уберите его оттуда и повторите"
             )
         self._disabled.discard(name)
         if name in self._known_names():
@@ -451,13 +457,13 @@ class PluginManager:
                     force=True,
                 )
         self._disabled.add(name)
-        raise PluginLoadError(f"Plugin {name!r} was not found")
+        raise PluginLoadError(f"Плагин {name!r} не найден")
 
     async def disable(self, name: str) -> None:
         if name not in self._known_names():
             state = await self.storage.get_plugin_state(name)
             if state is None:
-                raise PluginLoadError(f"Plugin {name!r} was not found")
+                raise PluginLoadError(f"Плагин {name!r} не найден")
         self._disabled.add(name)
         await self.unload(name)
         await self._mark_disabled(name)
@@ -551,8 +557,8 @@ class PluginManager:
         local_names = set(self.discover_local_names())
         if package.name in local_names:
             raise PluginLoadError(
-                f"Git plugin {package.name!r} conflicts with the local plugin of the same name; "
-                "rename or remove the local plugin first"
+                f"Git-плагин {package.name!r} конфликтует с локальным плагином "
+                "с таким же именем; переименуйте или удалите локальный"
             )
         old = self._runtimes.get(package.name)
         if old is not None:
@@ -569,7 +575,7 @@ class PluginManager:
                     force=True,
                 )
             if runtime is None:
-                raise PluginLoadError(f"Plugin {package.name!r} is disabled")
+                raise PluginLoadError(f"Плагин {package.name!r} выключен")
             await self._prune_old_revisions(package.name, package.commit)
             return runtime
         except Exception:
@@ -591,7 +597,7 @@ class PluginManager:
     async def update_git(self, name: str, ref: str | None = None) -> PluginRuntime:
         runtime = self._runtimes.get(name)
         if runtime is None or runtime.source != "git" or not runtime.source_url:
-            raise PluginLoadError(f"Plugin {name!r} is not an active Git plugin")
+            raise PluginLoadError(f"Плагин {name!r} не является активным Git-плагином")
         package = await self._git_source.fetch(
             url=runtime.source_url,
             ref=ref or "HEAD",
@@ -613,7 +619,7 @@ class PluginManager:
                     force=True,
                 )
             if updated is None:
-                raise PluginLoadError(f"Plugin {name!r} is disabled")
+                raise PluginLoadError(f"Плагин {name!r} выключен")
             await self._prune_old_revisions(name, package.commit)
             return updated
         except Exception:
@@ -630,13 +636,21 @@ class PluginManager:
             raise
 
     async def _prune_old_revisions(self, name: str, keep_commit: str) -> None:
-        """Keep only the newest few fetched revisions of a Git plugin."""
+        """Keep only the newest few fetched revisions of a Git plugin.
+
+        Staged revisions are ordered by their on-disk mtime, which
+        ``_stage_revision`` sets at fetch time. Sorting by directory name would
+        order by commit SHA and therefore keep an arbitrary set.
+        """
         parent = self.settings.git_plugin_dir / name
         try:
-            revisions = sorted(path for path in parent.iterdir() if path.is_dir())
+            revisions = [path for path in parent.iterdir() if path.is_dir()]
         except OSError:
             return
-        for stale in revisions[:-GIT_KEEP_REVISIONS]:
+        if len(revisions) <= GIT_KEEP_REVISIONS:
+            return
+        ordered = sorted(revisions, key=_revision_mtime)
+        for stale in ordered[: len(ordered) - GIT_KEEP_REVISIONS]:
             if stale.name == keep_commit:
                 continue
             await asyncio.to_thread(self._remove_tree, stale)

@@ -205,9 +205,7 @@ class PluginContext:
         if schema_version > current_version:
             # A cancelled migration must not be recorded as applied, so the
             # plugin's own code has to tolerate being re-run.
-            await asyncio.wait_for(
-                self.instance.migrate(self.storage), timeout=MIGRATE_TIMEOUT
-            )
+            await asyncio.wait_for(self.instance.migrate(self.storage), timeout=MIGRATE_TIMEOUT)
             await self._core_storage.record_migration(self.plugin_name, schema_version)
         await asyncio.wait_for(self.instance.setup(self), timeout=SETUP_TIMEOUT)
         await asyncio.wait_for(self.instance.start(), timeout=START_TIMEOUT)

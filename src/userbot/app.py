@@ -5,12 +5,17 @@ import contextlib
 import signal
 import sys
 import time
-from typing import Any
 
 from . import __version__
-from .commands import CommandContext, CommandDispatcher, parse_plugin_action
+from .commands import (
+    CommandContext,
+    CommandDispatcher,
+    PluginAction,
+    parse_plugin_action,
+)
 from .config import Settings
 from .gateway import TelegramGateway
+from .git_source import GitSourceError
 from .health import HealthService
 from .loader import PluginLoadError
 from .logging import setup_logging
@@ -25,6 +30,10 @@ HEARTBEAT_INTERVAL = 10.0
 #: Longest a plugin command may run before it is reported as timed out.
 DEFAULT_COMMAND_TIMEOUT = 120.0
 
+#: Total budget for an orderly shutdown. Must stay below the unit's
+#: TimeoutStopSec, otherwise systemd SIGKILLs the process mid-unload.
+SHUTDOWN_TIMEOUT = 25.0
+
 
 class UserbotApp:
     def __init__(self, settings: Settings):
@@ -32,6 +41,7 @@ class UserbotApp:
         self.settings = settings
         self.logger = setup_logging(settings.log_dir, settings.log_level, json=settings.log_json)
         self.health = HealthService()
+        self.health.heartbeat_path = settings.heartbeat_path
         self.storage = Storage(settings.database_path)
         self.rate_limiter = RateLimiter(min_interval=settings.min_request_interval)
         self.gateway = TelegramGateway(settings)
@@ -47,14 +57,17 @@ class UserbotApp:
             rate_limiter=self.rate_limiter,
             health=self.health,
         )
+        self.manager.set_shutdown_timeout(SHUTDOWN_TIMEOUT)
         self.watcher = PluginWatcher(
             self.manager,
             settings.plugin_dir,
             interval=settings.watch_interval,
+            quiesce_timeout=SHUTDOWN_TIMEOUT,
         )
         self._stop_event = asyncio.Event()
         self._shutdown_lock = asyncio.Lock()
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._connection_task: asyncio.Task[None] | None = None
         self._started = False
 
     # -- lifecycle ----------------------------------------------------------
@@ -71,6 +84,7 @@ class UserbotApp:
                 raise RuntimeError("Telegram did not return the authorized account")
             self.dispatcher.add_owner(int(me.id))
             self.health.set_telegram_state(connected=True, authorized=True)
+            self.gateway.on_connection_state(self._on_connection_state)
             self.dispatcher.attach_client(self.gateway.client)
             self._register_core_commands()
             await self.manager.initialize_state()
@@ -79,8 +93,9 @@ class UserbotApp:
                 await self.watcher.start()
             else:
                 self.logger.info("plugin watcher disabled by configuration")
-            self._heartbeat_task = asyncio.create_task(
-                self._heartbeat_loop(), name="heartbeat"
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
+            self._connection_task = asyncio.create_task(
+                self.gateway.monitor_connection(), name="connection-monitor"
             )
             self._started = True
             self.logger.info(
@@ -102,6 +117,7 @@ class UserbotApp:
             with contextlib.suppress(Exception):
                 await self.watcher.stop()
             self._stop_heartbeat()
+            self._stop_connection_monitor()
             with contextlib.suppress(Exception):
                 await self.manager.shutdown()
             self.dispatcher.detach_client()
@@ -134,6 +150,18 @@ class UserbotApp:
         if task is None:
             return
         task.cancel()
+
+    def _stop_connection_monitor(self) -> None:
+        task, self._connection_task = self._connection_task, None
+        if task is None:
+            return
+        task.cancel()
+
+    def _on_connection_state(self, *, connected: bool) -> None:
+        """Keep the reported Telegram state honest across network drops."""
+        self.health.set_telegram_state(connected=connected, authorized=connected)
+        if not connected:
+            self.health.mark_error("Telegram connection lost")
 
     async def _heartbeat_loop(self) -> None:
         path = self.settings.heartbeat_path
@@ -276,9 +304,7 @@ class UserbotApp:
                 await command.respond(f"Плагин {name} не найден.")
                 return
             if self.manager.is_disabled(name):
-                await command.respond(
-                    f"Плагин {name} выключен. Сначала /ub plugin enable {name}."
-                )
+                await command.respond(f"Плагин {name} выключен. Сначала /ub plugin enable {name}.")
                 return
             await self.manager.load_local(name, force=True)
             await command.respond(f"Плагин {name} перезагружен.")
@@ -293,22 +319,26 @@ class UserbotApp:
         await self.manager.reload_local(name)
         await command.respond(f"Плагин {name} перезагружен.")
 
-    async def _install_plugin(self, command: CommandContext, parsed: Any) -> None:
-        if parsed.ref is None:
-            await command.respond(
-                "Использование: /ub plugin install <url> <ref> [подпапка]"
-            )
+    async def _install_plugin(self, command: CommandContext, parsed: PluginAction) -> None:
+        if parsed.ref is None or parsed.commit is None:
+            await command.respond("Использование: /ub plugin install <url> <ref> [подпапка]")
             return
-        await command.respond("Загружаю плагин…")
-        runtime = await self.manager.install_git(
-            parsed.ref, parsed.commit, subpath=parsed.subpath
-        )
+        try:
+            runtime = await self.manager.install_git(
+                parsed.ref, parsed.commit, subpath=parsed.subpath
+            )
+        except PluginLoadError:
+            # Re-raise so the single top-level handler formats the reply; sending
+            # a "loading…" message first would put the error in a second bubble.
+            raise
+        except GitSourceError as exc:
+            await command.respond(f"Ошибка загрузки: {exc}")
+            return
         await command.respond(
-            f"Плагин {runtime.name} установлен из commit "
-            f"{(runtime.source_ref or 'unknown')[:12]}."
+            f"Плагин {runtime.name} установлен из commit {(runtime.source_ref or 'unknown')[:12]}."
         )
 
-    async def _update_plugin(self, command: CommandContext, parsed: Any) -> None:
+    async def _update_plugin(self, command: CommandContext, parsed: PluginAction) -> None:
         if parsed.name is None:
             await command.respond("Использование: /ub plugin update <name> [ref]")
             return

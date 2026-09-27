@@ -166,9 +166,7 @@ class FakeClient:
             self.handlers = [item for item in self.handlers if item[0] is not callback]
         else:
             self.handlers = [
-                item
-                for item in self.handlers
-                if not (item[0] is callback and item[1] is event)
+                item for item in self.handlers if not (item[0] is callback and item[1] is event)
             ]
         return before - len(self.handlers)
 

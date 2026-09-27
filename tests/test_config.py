@@ -133,9 +133,7 @@ def test_rejects_invalid_owner_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         Settings.from_env(tmp_path)
 
 
-def test_rejects_non_numeric_tuning_values(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_rejects_non_numeric_tuning_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TGUSERBOT_MIN_INTERVAL", "soon")
     with pytest.raises(RuntimeError, match="must be numbers"):
         Settings.from_env(tmp_path)

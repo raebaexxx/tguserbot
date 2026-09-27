@@ -152,9 +152,7 @@ async def test_load_is_skipped_when_not_forced(plugin_root: Path) -> None:
 async def test_health_counts_reloads(plugin_root: Path, tmp_path: Path) -> None:
     write_plugin(plugin_root, "alpha", body=make_noop_plugin("alpha"))
     health = HealthService()
-    manager, storage, client, dispatcher = await build_manager(
-        tmp_path, plugin_root, health=health
-    )
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root, health=health)
     try:
         await manager.load_all_local()
         assert health.reload_count == 0
@@ -208,9 +206,7 @@ async def test_failed_reload_keeps_the_previous_handlers_attached(
         await storage.close()
 
 
-async def test_successful_reload_swaps_the_generation(
-    plugin_root: Path, tmp_path: Path
-) -> None:
+async def test_successful_reload_swaps_the_generation(plugin_root: Path, tmp_path: Path) -> None:
     write_plugin(plugin_root, "alpha", body=make_command_plugin("alpha"))
     manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
     try:
@@ -242,9 +238,7 @@ async def test_disable_unloads_and_persists(plugin_root: Path, tmp_path: Path) -
         await storage.close()
 
 
-async def test_enable_reloads_a_disabled_local_plugin(
-    plugin_root: Path, tmp_path: Path
-) -> None:
+async def test_enable_reloads_a_disabled_local_plugin(plugin_root: Path, tmp_path: Path) -> None:
     write_plugin(plugin_root, "alpha", body=make_command_plugin("alpha"))
     manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
     try:
@@ -263,19 +257,17 @@ async def test_enable_reports_a_plugin_that_does_not_exist(
 ) -> None:
     manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
     try:
-        with pytest.raises(PluginLoadError, match="not found"):
+        with pytest.raises(PluginLoadError, match="не найден"):
             await manager.enable("absent")
     finally:
         await manager.shutdown()
         await storage.close()
 
 
-async def test_disabling_an_unknown_plugin_is_rejected(
-    plugin_root: Path, tmp_path: Path
-) -> None:
+async def test_disabling_an_unknown_plugin_is_rejected(plugin_root: Path, tmp_path: Path) -> None:
     manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
     try:
-        with pytest.raises(PluginLoadError, match="not found"):
+        with pytest.raises(PluginLoadError, match="не найден"):
             await manager.disable("typo-name")
         assert await storage.plugin_states() == []
     finally:
@@ -339,9 +331,7 @@ async def test_settings_disable_is_reported_when_enabling(
         await storage.close()
 
 
-async def test_reload_of_a_disabled_plugin_is_a_noop(
-    plugin_root: Path, tmp_path: Path
-) -> None:
+async def test_reload_of_a_disabled_plugin_is_a_noop(plugin_root: Path, tmp_path: Path) -> None:
     write_plugin(plugin_root, "alpha", body=make_command_plugin("alpha"))
     manager, storage, client, dispatcher = await build_manager(
         tmp_path, plugin_root, disabled_plugins=frozenset({"alpha"})
@@ -459,9 +449,7 @@ async def test_shutdown_marks_plugins_unloaded(plugin_root: Path, tmp_path: Path
     await storage.close()
 
 
-async def test_shutdown_survives_a_failing_stop_hook(
-    plugin_root: Path, tmp_path: Path
-) -> None:
+async def test_shutdown_survives_a_failing_stop_hook(plugin_root: Path, tmp_path: Path) -> None:
     write_plugin(
         plugin_root,
         "alpha",
@@ -483,9 +471,7 @@ async def test_shutdown_survives_a_failing_stop_hook(
     await storage.close()
 
 
-async def test_shutdown_respects_a_global_deadline(
-    plugin_root: Path, tmp_path: Path
-) -> None:
+async def test_shutdown_respects_a_global_deadline(plugin_root: Path, tmp_path: Path) -> None:
     write_plugin(plugin_root, "alpha", body=make_slow_stop_plugin("alpha", delay=5.0))
     write_plugin(plugin_root, "beta", body=make_slow_stop_plugin("beta", delay=5.0))
     manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
@@ -592,9 +578,7 @@ async def test_echo_command_round_trip(real_plugin_dir: Path, tmp_path: Path) ->
         await storage.close()
 
 
-async def test_echo_rejects_an_overlong_argument(
-    real_plugin_dir: Path, tmp_path: Path
-) -> None:
+async def test_echo_rejects_an_overlong_argument(real_plugin_dir: Path, tmp_path: Path) -> None:
     manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)
     try:
         await manager.load_all_local()
@@ -633,9 +617,7 @@ async def test_notes_round_trip(real_plugin_dir: Path, tmp_path: Path) -> None:
         await storage.close()
 
 
-async def test_notes_delete_reports_a_miss_honestly(
-    real_plugin_dir: Path, tmp_path: Path
-) -> None:
+async def test_notes_delete_reports_a_miss_honestly(real_plugin_dir: Path, tmp_path: Path) -> None:
     """Regression: ``Storage.execute`` used to return a stale ``lastrowid`` for
     DELETE, so ``notes delete`` always claimed success."""
     manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)

@@ -38,20 +38,22 @@ class RateLimiter:
         return lock
 
     async def _wait_turn(self, key: str) -> float:
-        """Block until this key's minimum interval has elapsed; return the delay."""
-        if self.min_interval <= 0:
-            return 0.0
+        """Reserve this key's next start slot; return how long to wait for it.
+
+        The slot is *reserved* before sleeping. Recording the current time and
+        then sleeping instead would give every concurrent caller the same delay,
+        so N same-key operations would all start together rather than queue.
+        """
         async with self._key_lock(key):
             async with self._lock:
                 now = time.monotonic()
                 previous = self._last_started.get(key)
-                self._last_started[key] = now
+                reserved = now if previous is None else max(now, previous + self.min_interval)
+                self._last_started[key] = reserved
+                self._last_started.move_to_end(key)
                 while len(self._last_started) > MAX_TRACKED_KEYS:
                     self._last_started.popitem(last=False)
-            if previous is None:
-                return 0.0
-            delay = self.min_interval - (now - previous)
-            return max(0.0, delay)
+                return max(0.0, reserved - now)
 
     @asynccontextmanager
     async def slot(self, key: str | int) -> AsyncIterator[None]:

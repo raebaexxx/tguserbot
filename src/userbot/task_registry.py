@@ -18,11 +18,14 @@ async def run_uninterruptible(
     Cleanup paths that restore manager consistency (deactivating a context that
     was already replaced, rolling a half-applied migration back) must not be
     interrupted half-way, otherwise the process is left with a live context that
-    nothing tracks. ``asyncio.wait_for`` and ``Task.cancel`` deliver exactly one
-    ``CancelledError``, so re-awaiting the shielded task lets the cleanup finish
-    and the caller still observes the cancellation afterwards.
+    nothing tracks. ``Task.cancel`` delivers exactly one ``CancelledError``, so
+    re-awaiting the shielded task lets the cleanup finish.
+
+    Any cancellation absorbed on the way is re-raised afterwards, so a caller
+    that forgets to re-raise it itself still sees it.
     """
     task = asyncio.ensure_future(coroutine)
+    absorbed_cancel = False
     attempts = 0
     while not task.done():
         attempts += 1
@@ -32,6 +35,7 @@ async def run_uninterruptible(
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
+            absorbed_cancel = True
             continue
         except Exception:
             logger.exception("uninterruptible cleanup failed")
@@ -40,6 +44,8 @@ async def run_uninterruptible(
         exception = task.exception()
         if exception is not None:
             logger.error("uninterruptible cleanup raised %r", exception)
+    if absorbed_cancel:
+        raise asyncio.CancelledError
 
 
 class TaskGroup:

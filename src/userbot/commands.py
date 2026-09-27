@@ -95,9 +95,7 @@ def parse_plugin_action(text: str) -> PluginAction | None:
         subpath = rest[2] if len(rest) > 2 else None
         if subpath is not None and (len(rest) > 3 or any(char.isspace() for char in subpath)):
             return None
-        return PluginAction(
-            action="install", ref=rest[0], commit=rest[1], subpath=subpath
-        )
+        return PluginAction(action="install", ref=rest[0], commit=rest[1], subpath=subpath)
     if not rest:
         return None
     return PluginAction(action="update", name=rest[0], commit=rest[1] if len(rest) > 1 else None)
@@ -319,9 +317,7 @@ class CommandDispatcher:
             logger.exception(
                 "command /%s from plugin %s failed", registration.name, registration.plugin_name
             )
-            await self._notify(
-                command, "Ошибка выполнения команды; подробности записаны в лог."
-            )
+            await self._notify(command, "Ошибка выполнения команды; подробности записаны в лог.")
 
     async def _notify(self, command: CommandContext, text: str) -> None:
         try:

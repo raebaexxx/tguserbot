@@ -29,9 +29,7 @@ class Plugin(BasePlugin):
             )
             """
         )
-        await storage.execute(
-            "CREATE INDEX IF NOT EXISTS notes_chat_id_id ON notes(chat_id, id)"
-        )
+        await storage.execute("CREATE INDEX IF NOT EXISTS notes_chat_id_id ON notes(chat_id, id)")
 
     async def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -75,8 +73,7 @@ class Plugin(BasePlugin):
 
     async def _list(self, command: CommandContext, chat_id: str) -> None:
         rows = await self.ctx.storage.fetchall(
-            "SELECT id, body, created_at FROM notes "
-            "WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            "SELECT id, body, created_at FROM notes WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
             (chat_id, PAGE_SIZE),
         )
         if not rows:

@@ -46,9 +46,7 @@ RETRIES = 3
 #: routinely served a challenge page instead of the video.
 IMPERSONATE_TARGET = "chrome"
 
-USER_AGENT = (
-    "Mozilla/5.0 (compatible; tguserbot/0.1; +https://github.com/raebaexxx/tguserbot)"
-)
+USER_AGENT = "Mozilla/5.0 (compatible; tguserbot/0.1; +https://github.com/raebaexxx/tguserbot)"
 
 
 class TikTokDownloadError(RuntimeError):
@@ -249,9 +247,7 @@ class Plugin(BasePlugin):
                 await event.respond(file=str(video_path))
             sent = True
         except TikTokFileTooLarge:
-            await self._show_error(
-                event, "Видео слишком большое для этого плагина (лимит 50 МБ)."
-            )
+            await self._show_error(event, "Видео слишком большое для этого плагина (лимит 50 МБ).")
         except TikTokDownloadError as exc:
             if self.ctx is not None:
                 self.ctx.logger.warning("TikTok download failed: %s", type(exc).__name__)

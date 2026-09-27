@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse, urlunparse
@@ -48,6 +49,11 @@ def _remove_tree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _touch(path: Path) -> None:
+    now = time.time()
+    os.utime(path, (now, now))
+
+
 def canonical_repo_url(url: str) -> str:
     """Normalise a repository URL so the allow-list compares like with like.
 
@@ -66,9 +72,13 @@ def canonical_repo_url(url: str) -> str:
     parsed = urlparse(candidate)
     if not parsed.scheme:
         raise GitSourceError(f"Unsupported Git URL: {url!r}")
-    if parsed.username or parsed.password:
+    if parsed.password:
         raise GitSourceError("Credentials must not be embedded in Git URLs")
-    if parsed.port not in (None, 443, 22):
+    if parsed.scheme in {"https", "http"} and parsed.username:
+        raise GitSourceError("Credentials must not be embedded in Git URLs")
+    if parsed.scheme == "ssh" and parsed.username not in (None, "git"):
+        raise GitSourceError("Only the 'git' SSH user is supported")
+    if parsed.port not in (None, 443, 22, 80):
         raise GitSourceError("Unexpected port in the Git URL")
     if parsed.scheme not in {"https", "ssh", "http"}:
         raise GitSourceError("Only HTTPS and SSH Git URLs are supported")
@@ -142,9 +152,7 @@ class GitPluginSource:
                 "No Git repositories are allowed; set TGUSERBOT_GIT_ALLOWED_REPOS first"
             )
         if normalized not in self.allowed:
-            raise GitSourceError(
-                f"Git repository {url!r} is not in TGUSERBOT_GIT_ALLOWED_REPOS"
-            )
+            raise GitSourceError(f"Git repository {url!r} is not in TGUSERBOT_GIT_ALLOWED_REPOS")
         return normalized
 
     @staticmethod
@@ -154,6 +162,10 @@ class GitPluginSource:
         normalized = subpath.strip().replace("\\", "/")
         path = PurePosixPath(normalized)
         if path.is_absolute() or ".." in path.parts or not path.parts:
+            raise GitSourceError("Invalid Git plugin subpath")
+        # Reject Windows drive letters and UNC paths, which are not absolute to
+        # PurePosixPath but would still escape the checkout on that platform.
+        if re.match(r"^[A-Za-z]:", normalized) or normalized.startswith("//"):
             raise GitSourceError("Invalid Git plugin subpath")
         return path.as_posix()
 
@@ -183,9 +195,7 @@ class GitPluginSource:
                 "The 'git' executable was not found; install git to use Git plugins"
             ) from exc
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=GIT_TIMEOUT
-            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=GIT_TIMEOUT)
         except TimeoutError as exc:
             try:
                 process.kill()
@@ -258,6 +268,9 @@ class GitPluginSource:
                 await asyncio.to_thread(_remove_tree, package_path)
             else:
                 await asyncio.to_thread(shutil.move, str(package_path), str(final_path))
+                # Stamp the fetch time so revision pruning can order by recency;
+                # a commit SHA carries no ordering information.
+                await asyncio.to_thread(_touch, final_path)
             package_path = None
             return GitPackage(
                 name=manifest.name,
@@ -273,8 +286,6 @@ class GitPluginSource:
 
     async def _remove_stale_temp_dirs(self) -> None:
         """Reap leftovers from a previous crash; ``mkdtemp`` alone leaks them."""
-        import time
-
         now = time.time()
         try:
             entries = list(self.settings.git_plugin_dir.iterdir())
