@@ -542,3 +542,88 @@ def test_uv_lock_is_in_sync_with_pyproject() -> None:
         assert f'name = "{name.group(1)}"' in uv_lock, (
             f"{name.group(1)} is in pyproject dev extras but not in uv.lock; run `uv lock`"
         )
+
+
+# --- the update must not pull out from under a running process -------------
+
+
+def _update_code_body() -> str:
+    """The body of ``update_code``, for ordering assertions."""
+    text = CTL.read_text(encoding="utf-8")
+    start = text.index("update_code() {")
+    end = text.index("\n}", start)
+    return text[start:end]
+
+
+def test_update_stops_the_service_before_pulling() -> None:
+    """A live process must not see a half-updated tree.
+
+    The watcher is on by default -- ``TGUSERBOT_WATCH`` defaults to 1 -- so
+    while the service is running, a ``git pull`` looks like a plugin edit and
+    triggers a hot reload. The process still holds the old ``userbot.gemini`` in
+    memory while the new plugin source on disk imports from it, and the reload
+    fails:
+
+        Cannot load plugin sum: cannot import name 'ModelRouter' from
+        'userbot.gemini'
+
+    which is not a real defect in either file. It is the pull happening while
+    the process is live. Stopping first costs a few seconds of downtime and
+    removes the whole class.
+    """
+    body = _update_code_body()
+    stop = body.find("systemctl_cmd stop")
+    pull = body.find("git -C \"${APP_DIR}\" pull --ff-only")
+    assert stop != -1, "update never stops the service before changing the tree"
+    assert pull != -1, "update no longer pulls"
+    assert stop < pull, (
+        "the pull must come after the stop, or the running process sees a "
+        "partially updated tree"
+    )
+
+
+def test_a_failed_update_still_leaves_the_service_running() -> None:
+    """Stopping first must not turn a bad update into a stopped bot.
+
+    The recovery lives in one helper rather than being repeated per path: a
+    copy per path is a copy that gets missed the next time a step is added.
+    """
+    body = _update_code_body()
+    assert body.count("systemctl_cmd start") >= 1, (
+        "the service has to be started explicitly after the stop"
+    )
+    # Every `exit 1` from a failure path goes through the recovery.
+    for exit_at in re.finditer(r"exit 1", body):
+        before = body[: exit_at.start()].rstrip().splitlines()[-3:]
+        assert any("rollback_and_start" in line for line in before), (
+            f"an exit 1 does not restore the service: {before!r}"
+        )
+
+
+def test_a_failing_pull_does_not_leave_the_bot_stopped() -> None:
+    """Stopping first moves the burden onto the failure paths.
+
+    Under `set -e` a failed `git pull` used to exit with the service still
+    running, which was the safe outcome. After the stop was added it would exit
+    with the bot down and never started again -- an update that fails to apply
+    is not a reason to take the bot offline. Each step therefore checks its own
+    result and comes back.
+    """
+    body = _update_code_body()
+    # No bare `run_as_service_user git ... pull` left to trip set -e.
+    assert not re.search(r"^\s*run_as_service_user git .*pull", body, re.M), (
+        "the pull is still unguarded; a failure would exit with the bot stopped"
+    )
+    assert "if ! run_as_service_user git" in body, body
+    assert body.count("rollback_and_start") >= 4, (
+        "every failure path has to restore the service, not just the health check"
+    )
+
+
+def test_rollback_brings_the_service_back_up() -> None:
+    """The helper is the recovery, so it has to start something."""
+    text = CTL.read_text(encoding="utf-8")
+    start = text.index("rollback_and_start() {")
+    helper = text[start:text.index("\n}", start)]
+    assert "systemctl_cmd start" in helper or "systemctl_cmd restart" in helper, helper
+    assert "git" in helper, "the half-updated tree has to be put back"

@@ -89,10 +89,23 @@ first and restart.
 
 ## Hot reload on a server
 
-Local plugin changes are detected by the watcher, **except** in the default
-deployment. The unit sets `ProtectSystem=strict`, which makes
-`/opt/tguserbot/plugins` read-only, so the watcher cannot fire there. To enable
-it, point the plugin directory at writable storage:
+The watcher is **on by default** (`TGUSERBOT_WATCH` defaults to `1`). The unit
+sets `ProtectSystem=strict`, which makes `/opt/tguserbot/plugins` read-only, so
+a reload there cannot *write* — but it still *tries*, and this matters for
+updates: a `git pull` performed while the service is running looks exactly like a
+plugin edit. The running process still holds the old modules in memory while the
+new sources on disk import from them, and the reload fails on a tree that is not
+broken:
+
+```text
+Cannot load plugin sum: cannot import name 'ModelRouter' from 'userbot.gemini'
+```
+
+`tguserbotctl update` stops the service before pulling, so this cannot happen
+through the supported path. If you pull by hand, stop it yourself first.
+
+To let the watcher actually reload, point the plugin directory at writable
+storage:
 
 ```toml
 TGUSERBOT_PLUGIN_DIR=/var/lib/tguserbot/plugins
@@ -111,10 +124,11 @@ Git plugin updates are never automatic; use the owner-only
 sudo tguserbotctl update
 ```
 
-This pulls the latest code, reinstalls the locked dependencies, restarts the
-service, and waits for a health check. If the service does not come up it
-restores the previous commit and reinstalls from that, so a bad update does not
-leave a crash loop.
+This **stops the service**, pulls the latest code, reinstalls the locked
+dependencies, starts it again, and waits for a health check. If the service does
+not come up — or if the pull or the install fails part-way — it restores the
+previous commit and starts the service on that, so a bad update does not leave a
+crash loop or a stopped bot.
 
 To inspect or change the configuration the bot actually sees:
 

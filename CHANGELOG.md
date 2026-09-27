@@ -63,6 +63,17 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   seconds because it carries a transcript and media, back to the 120 second
   default. The router takes a timeout again, and `None` defers to the client's own
   default rather than keeping a second copy of the number to drift.
+- **Every deploy produced a confusing traceback.** `tguserbotctl update` pulled
+  while the service was live. The plugin watcher is on by default, so a pull looks
+  like a plugin edit: the running process holds the old modules in memory while
+  the new sources on disk import from them, and the reload fails with
+  `Cannot load plugin sum: cannot import name 'ModelRouter'` on a tree that is not
+  broken. The service is stopped before the pull now, which moves the burden onto
+  the failure paths — `set -e` would otherwise exit with the bot stopped — so the
+  pull and both installs are checked, and every failure restores the previous
+  commit and starts the service. The deploy README also claimed the watcher
+  "cannot hot-reload" under `ProtectSystem=strict`, which is not what happens: it
+  cannot *write*, and it tries.
 
 - **Streaming progress never appeared in production.** The ai plugin edited its
   placeholder with `event.edit_text`, and telethon's `Message` has no such

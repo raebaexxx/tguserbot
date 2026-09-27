@@ -274,32 +274,63 @@ health_check() {
   fi
 }
 
+rollback_and_start() {
+  # Every failure path out of update_code has to leave a running bot. The tree
+  # may be half-updated -- git pull writes files one at a time -- so going back
+  # to the commit we came from is the only state known to work.
+  local previous="${1:-}"
+  if [ -n "${previous}" ]; then
+    echo "Rolling back to ${previous}." >&2
+    run_as_service_user git -C "${APP_DIR}" checkout --quiet "${previous}" || true
+    run_as_service_user "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}" || true
+  fi
+  systemctl_cmd start "${SERVICE_NAME}" || systemctl_cmd restart "${SERVICE_NAME}" || true
+}
+
 update_code() {
   if is_system_mode; then
     require_root_for_system update
     local previous
     previous="$(git -C "${APP_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    # Stop first, then pull. The plugin watcher is on by default, so a pull with
+    # the service live looks like a plugin edit: the running process still holds
+    # the old modules in memory while the new sources on disk import from them,
+    # and the reload fails on a tree that is not broken. This cost a real
+    # confusing traceback on every deploy. Downtime is a few seconds of pip.
+    #
+    # Stopping first puts the burden on the failure paths instead: `set -e` used
+    # to exit with the bot still running, and now would exit with it stopped, so
+    # every step below is checked and recovers.
+    systemctl_cmd stop "${SERVICE_NAME}" || true
     chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.venv" 2>/dev/null || true
-    run_as_service_user git -C "${APP_DIR}" pull --ff-only
-    run_as_service_user "${PYTHON}" -m pip install \
-      --require-hashes -r "${APP_DIR}/requirements.lock"
-    run_as_service_user "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}"
-    if systemctl_cmd restart "${SERVICE_NAME}"; then
+    if ! run_as_service_user git -C "${APP_DIR}" pull --ff-only; then
+      echo "Pull failed; restoring ${previous} and starting the service." >&2
+      rollback_and_start "${previous}"
+      exit 1
+    fi
+    if ! run_as_service_user "${PYTHON}" -m pip install \
+      --require-hashes -r "${APP_DIR}/requirements.lock"; then
+      echo "Dependency install failed; rolling back to ${previous}." >&2
+      rollback_and_start "${previous}"
+      exit 1
+    fi
+    if ! run_as_service_user "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}"; then
+      echo "Install failed; rolling back to ${previous}." >&2
+      rollback_and_start "${previous}"
+      exit 1
+    fi
+    if systemctl_cmd start "${SERVICE_NAME}"; then
       sleep 3
       if health_check; then
         echo "Updated to $(git -C "${APP_DIR}" rev-parse --short HEAD); service is healthy."
       else
         echo "Health check failed after updating to $(git -C "${APP_DIR}" rev-parse --short HEAD)." >&2
-        echo "Rolling back to ${previous}." >&2
-        run_as_service_user git -C "${APP_DIR}" checkout --quiet "${previous}"
-        run_as_service_user "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}"
-        systemctl_cmd restart "${SERVICE_NAME}" || true
+        rollback_and_start "${previous}"
         exit 1
       fi
     else
-      echo "Restart failed; rolling back to ${previous}." >&2
-      run_as_service_user git -C "${APP_DIR}" checkout --quiet "${previous}"
-      systemctl_cmd restart "${SERVICE_NAME}" || true
+      echo "Start failed; rolling back to ${previous}." >&2
+      rollback_and_start "${previous}"
       exit 1
     fi
   else
