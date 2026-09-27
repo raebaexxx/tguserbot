@@ -89,6 +89,10 @@ class StubGateway:
         self.disconnected = False
         self.raise_on_connect: BaseException | None = None
         self.hooks: list[Any] = []
+        self.catch_up_calls = 0
+
+    async def catch_up(self) -> None:
+        self.catch_up_calls += 1
 
     async def connect(self) -> Any:
         if self.raise_on_connect is not None:
@@ -513,6 +517,34 @@ async def test_reload_releases_a_failed_plugin(app_settings: Settings) -> None:
         await app.shutdown()
 
 
+async def test_start_catches_up_after_plugins_are_loaded(app_settings: Settings) -> None:
+    """Missed commands are replayed only once plugin handlers are attached."""
+    write_plugin(app_settings.plugin_dir, "alpha", body=make_command_plugin("alpha"))
+    app, gateway = make_app(app_settings)
+    await app.start()
+    try:
+        assert gateway.catch_up_calls == 1
+        assert app.manager.active_count() == 1
+    finally:
+        await app.shutdown()
+
+
+async def test_start_survives_a_failing_catch_up(
+    app_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, gateway = make_app(app_settings)
+
+    async def boom() -> None:
+        raise RuntimeError("catch-up failed")
+
+    monkeypatch.setattr(gateway, "catch_up", boom)
+    await app.start()
+    try:
+        assert app._started
+    finally:
+        await app.shutdown()
+
+
 async def test_handlers_are_removed_on_shutdown(app_settings: Settings) -> None:
     write_plugin(app_settings.plugin_dir, "beta", body=make_handler_plugin(r"^ping$"))
     app, gateway = make_app(app_settings)
@@ -654,13 +686,105 @@ async def test_connect_reports_a_revoked_session(
     assert gateway._lock_file is None, "a revoked session must not keep the lock"
 
 
-async def test_connect_uses_catch_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression: the default catch_up=False silently dropped offline commands."""
-    gateway = TelegramGateway(make_gateway_settings(tmp_path))
-    seen: dict[str, bool] = {}
+def test_every_telethon_call_site_matches_the_installed_library() -> None:
+    """Guard against calling Telethon with keywords it does not accept.
 
-    async def fake_connect(catch_up: bool = True) -> None:
-        seen["catch_up"] = catch_up
+    Passing ``catch_up=True`` to ``TelegramClient.connect()`` crashed the
+    service on every start, and the unit tests missed it because they mocked
+    the very methods whose signatures were wrong. Telethon is pinned exactly,
+    so its signatures are stable and cheap to assert against -- do this
+    whenever a Telethon call is added or changed.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    from telethon import TelegramClient
+
+    source_root = Path(__file__).resolve().parent.parent / "src" / "userbot"
+    # Methods we invoke on the client, mapped to the real signature.
+    checked: dict[str, inspect.Signature] = {
+        name: inspect.signature(getattr(TelegramClient, name))
+        for name in (
+            "connect",
+            "disconnect",
+            "is_connected",
+            "is_user_authorized",
+            "get_me",
+            "start",
+            "sign_in",
+            "catch_up",
+            "add_event_handler",
+            "remove_event_handler",
+        )
+    }
+
+    problems: list[str] = []
+    for path in sorted(source_root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute):
+                continue
+            if not isinstance(func.value, ast.Attribute):
+                continue
+            if func.value.attr not in {"client", "self"}:
+                continue
+            if func.attr not in checked:
+                continue
+            signature = checked[func.attr]
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            if accepts_kwargs:
+                continue
+            allowed = {
+                parameter.name
+                for parameter in signature.parameters.values()
+                if parameter.kind
+                not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+                and parameter.name != "self"
+            }
+            for keyword in node.keywords:
+                if keyword.arg is not None and keyword.arg not in allowed:
+                    problems.append(
+                        f"{path.name}:{node.lineno} client.{func.attr}() does not accept "
+                        f"{keyword.arg!r}; it takes {sorted(allowed) or 'no arguments'}"
+                    )
+    assert not problems, "\n".join(problems)
+
+
+async def test_connect_uses_the_real_telethon_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `TelegramClient.connect()` takes no arguments in Telethon 1.45.
+
+    Passing ``catch_up=True`` there crashed the service on every start. The
+    other tests mocked ``connect`` and so could not see it; this asserts our
+    call site against the real library signature.
+    """
+    import inspect
+
+    from telethon import TelegramClient
+
+    signature = inspect.signature(TelegramClient.connect)
+    accepted = [
+        parameter.name
+        for parameter in signature.parameters.values()
+        if parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+    assert accepted == ["self"], f"connect() signature changed to {signature}; re-check the call"
+
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    seen: list[dict[str, object]] = []
+
+    async def fake_connect(*args: object, **kwargs: object) -> None:
+        seen.append(kwargs)
+        if kwargs:
+            raise TypeError(f"connect() got an unexpected keyword argument {list(kwargs)}")
 
     async def authorized() -> bool:
         return True
@@ -675,9 +799,42 @@ async def test_connect_uses_catch_up(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(gateway.client, "is_user_authorized", authorized)
     monkeypatch.setattr(gateway.client, "get_me", get_me)
     me = await gateway.connect()
-    assert seen["catch_up"] is True
     assert me.id == 1
+    assert seen == [{}], "connect() must be called without arguments"
     await gateway.disconnect()
+
+
+def test_catch_up_is_enabled_on_the_client(tmp_path: Path) -> None:
+    """Telethon defaults catch_up to False, which drops offline commands."""
+    import inspect
+
+    from telethon import TelegramClient
+
+    parameter = inspect.signature(TelegramClient.__init__).parameters["catch_up"]
+    assert parameter.default is False, "Telethon's default changed; re-check whether we need it"
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    assert gateway.client._catch_up is True, "the client must be built with catch_up=True"
+
+
+async def test_explicit_catch_up_is_tolerant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catch-up failure must never stop the bot from coming up."""
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    calls: list[bool] = []
+
+    async def fake_catch_up() -> None:
+        calls.append(True)
+
+    monkeypatch.setattr(gateway.client, "catch_up", fake_catch_up)
+    await gateway.catch_up()
+    assert calls == [True]
+
+    async def boom() -> None:
+        raise RuntimeError("catch-up failed")
+
+    monkeypatch.setattr(gateway.client, "catch_up", boom)
+    await gateway.catch_up()  # must not raise
 
 
 async def test_monitor_connection_reports_transitions(

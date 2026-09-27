@@ -89,6 +89,10 @@ class UserbotApp:
             self._register_core_commands()
             await self.manager.initialize_state()
             await self.manager.load_all_local()
+            # Replay anything sent while we were down, now that the plugins'
+            # handlers are attached.
+            with contextlib.suppress(Exception):
+                await self.gateway.catch_up()
             if self.settings.watch_enabled:
                 await self.watcher.start()
             else:

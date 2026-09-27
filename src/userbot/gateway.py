@@ -76,6 +76,11 @@ class TelegramGateway:
             str(self.settings.session_path),
             self.settings.api_id,
             self.settings.api_hash,
+            # Telethon defaults this to False, which means updates that arrived
+            # while the process was down are never replayed. Note that
+            # ``connect()`` takes no arguments in Telethon 1.45; catch-up is a
+            # constructor option plus an explicit ``catch_up()`` call.
+            catch_up=True,
             # A high threshold turns a multi-hour FloodWait into a loop-wide
             # sleep that freezes every plugin. Keep it bounded and let the
             # dispatcher decide what to do with the error instead.
@@ -184,9 +189,10 @@ class TelegramGateway:
         await self.acquire_session_lock()
         succeeded = False
         try:
-            # ``catch_up=True`` so commands sent while the process was down are
-            # still delivered; the default silently dropped them.
-            await self.client.connect(catch_up=True)
+            # ``connect()`` takes no arguments in Telethon 1.45; replaying
+            # missed updates is enabled in the constructor and refreshed by
+            # :meth:`catch_up` once plugins have attached their handlers.
+            await self.client.connect()
             if not await self.client.is_user_authorized():
                 raise GatewayError(
                     "Telegram session is not authorized; run `python -m userbot auth` first"
@@ -205,6 +211,21 @@ class TelegramGateway:
             # lock file blocks the next start until the process is killed.
             if not succeeded:
                 self.release_session_lock()
+
+    async def catch_up(self) -> None:
+        """Replay updates that arrived while the process was down.
+
+        Called after plugins have registered their handlers: Telethon documents
+        ``catch_up()`` as something to invoke once handlers are attached,
+        otherwise the replayed updates reach nobody. A failure here is logged
+        and swallowed -- it must not stop the bot from coming up.
+        """
+        try:
+            await self.client.catch_up()
+        except Exception as exc:
+            logger.warning("Could not replay missed updates: %s", type(exc).__name__)
+            return
+        logger.info("Replayed updates missed while offline")
 
     async def disconnect(self) -> None:
         if self.client.is_connected():

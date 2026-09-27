@@ -51,6 +51,12 @@ Also fixed:
   by commit SHA, which carries no ordering.
 - A revoked session no longer leaves the session lock held, which made the next
   start fail with a bogus "another process" error.
+- `gateway.connect()` no longer passes `catch_up` to `TelegramClient.connect()`,
+  which takes no arguments in Telethon 1.45 and crashed the service on every
+  start. Catch-up is a constructor option (`catch_up=True`, since Telethon
+  defaults it to `False`) plus an explicit `client.catch_up()` once plugins have
+  attached their handlers. A test now asserts every Telethon call site against
+  the installed library's signatures, so a mocked test cannot hide this again.
 - A fresh checkout with no data directory failed with a bare SQLite
   "unable to open database file", because Telethon opens the session inside the
   client constructor.
