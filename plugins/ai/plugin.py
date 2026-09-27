@@ -67,12 +67,65 @@ MODELS = {
 #: Sub-commands that are not a question.
 SUBCOMMANDS = frozenset({"list", "show", "new", "models", "reset"})
 
+#: Prefixes that select a model rather than being part of the question.
+MODES = frozenset({"pro", "fast"})
+
 #: Prefix on the streaming message, so a half-written answer is not mistaken
 #: for a finished one.
 STREAMING_MARK = "…"
 
 #: Telegram rejects edits faster than this; the real floor is much higher.
 MIN_EDIT_INTERVAL = 0.5
+
+
+#: How far a word may be from a mode name and still count as a typo for it.
+#:
+#: One, deliberately, not two. At two, ordinary question openers get flagged --
+#: "list", "note", "code" and "more" are each two edits from "fast" or "pro" --
+#: and a chat assistant that comments on "list my notes" is worse than one that
+#: quietly answers it. A missed hint costs a retype; a wrong hint costs trust.
+MODE_TYPO_DISTANCE = 1
+
+#: Below this length a near-match is coincidence: "how" is two edits from "pro".
+MODE_MIN_LENGTH = 3
+
+
+def nearest_mode(word: str) -> str | None:
+    """The mode ``word`` was probably meant to be, or ``None``.
+
+    Used only to *add a note*, never to change the question: a false positive
+    costs the user one extra line, whereas swallowing the word silently means
+    they get an answer to a question they did not ask.
+    """
+    target = word.lower()
+    if target in MODES:
+        return target
+    if len(target) < MODE_MIN_LENGTH:
+        return None
+    scored = sorted((_edit_distance(target, mode), mode) for mode in MODES)
+    best, mode = scored[0]
+    if best > MODE_TYPO_DISTANCE:
+        return None
+    if len(scored) > 1 and scored[1][0] == best:
+        return None  # equidistant from both: no basis for guessing
+    return mode
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance, for words short enough that the cost is trivial."""
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + (ca != cb),
+                )
+            )
+        previous = current
+    return previous[-1]
 
 
 class ProgressEditor:
@@ -90,6 +143,9 @@ class ProgressEditor:
         self._pending: str | None = None
         self._stop = asyncio.Event()
         self._edits = 0
+        #: Set once editing is known to be impossible, so it is not retried on
+        #: every single token.
+        self._broken = False
 
     @property
     def edits(self) -> int:
@@ -116,18 +172,28 @@ class ProgressEditor:
     async def _flush(self) -> None:
         text = self._pending
         self._pending = None
-        if text is None:
+        if text is None or self._broken:
             return
         self._edits += 1
         try:
             await self._event.edit_text(text)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            # The message may be gone, or Telegram may be refusing edits.
-            # Neither is worth retrying from inside a text stream.
-            LOGGER.debug("progress edit failed", exc_info=True)
+        except Exception as exc:
+            # The placeholder may not be editable at all -- respond() hands back
+            # whatever the transport returned. That used to be swallowed at
+            # DEBUG, which meant a total delivery failure left no trace in the
+            # journal. It is WARNING now, and reported once: a warning per token
+            # would be its own flood. The answer is delivered separately, so
+            # losing progress rendering is not fatal.
+            self._broken = True
             self._stop.set()
+            LOGGER.warning(
+                "ai: cannot edit the progress message (%s: %s); "
+                "answers will be sent as new messages",
+                type(exc).__name__,
+                exc,
+            )
 
     async def finish(self) -> None:
         self._stop.set()
@@ -255,9 +321,16 @@ class Plugin(BasePlugin):
             async with ctx.rate_limiter.slot("ai"):
                 if head in SUBCOMMANDS:
                     await self.subcommand(ctx, command, head, rest)
-                elif head in {"pro", "fast"}:
+                elif head in MODES:
                     await self.ask(ctx, command, rest, kind=head)
                 else:
+                    guess = nearest_mode(head) if rest else None
+                    if guess is not None:
+                        await command.respond(
+                            f"Режима {head!r} нет — похоже на {guess!r}. "
+                            f"Отвечаю на текст как на вопрос; для {guess}: "
+                            f"/ub ai {guess} {rest}"
+                        )
                     await self.ask(ctx, command, text, kind="chat")
         except (GeminiError, MissingKeyError) as exc:
             await command.respond(f"Gemini: {exc}")
@@ -314,19 +387,35 @@ class Plugin(BasePlugin):
             await asyncio.gather(worker, return_exceptions=True)
 
         answer = "".join(pieces).strip()
+        # The answer goes out as a new message, not as an edit.
+        #
+        # This is deliberate. Editing the placeholder is a nicety, and it turned
+        # out to be the only delivery path: when `respond()` hands back something
+        # that cannot be edited -- which is what happened live -- the answer, the
+        # "no text" notice and every progress update all failed together and the
+        # user got the placeholder and nothing else. Sending is the operation
+        # that is known to work, so it carries the answer; the placeholder is
+        # cleaned up afterwards.
         if not answer:
-            await self._replace(placeholder, "Модель не вернула текст.")
-            return
-        await self._replace(placeholder, answer)
-        # Keep the signature so the next turn is a real continuation.
-        await self.remember(ctx, Turn("model", [Part(text=answer)]))
+            await command.respond("Модель не вернула текст.")
+        else:
+            await command.respond(answer)
+            # Keep the signature so the next turn is a real continuation.
+            await self.remember(ctx, Turn("model", [Part(text=answer)]))
+        await self._discard(placeholder)
 
     @staticmethod
-    async def _replace(event: Any, text: str) -> None:
+    async def _discard(placeholder: Any) -> None:
+        """Remove the placeholder once the real answer is out."""
+        if placeholder is None:
+            return
         try:
-            await event.edit_text(text)
-        except Exception:
-            LOGGER.debug("final edit failed", exc_info=True)
+            await placeholder.delete()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Leaving a stray "…" behind is untidy, not broken.
+            LOGGER.debug("could not remove the placeholder: %s", exc)
 
     # -- generation --------------------------------------------------------
 

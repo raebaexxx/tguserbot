@@ -26,6 +26,21 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
 ### Fixed
 
+- **`/ub ai <question>` sent the placeholder and then nothing.** Every delivery
+  path went through `placeholder.edit_text()` -- the progress updates, the final
+  answer, and even the "the model returned no text" notice -- so when the
+  placeholder turned out not to be editable, all of them failed together and the
+  user got `…` and silence. The exceptions were swallowed at DEBUG, so the
+  journal was empty and there was no trace of the failure anywhere. The answer is
+  now sent as a new message, the operation that is known to work, and the
+  placeholder is deleted afterwards; a failed edit is reported once at WARNING
+  instead of being absorbed. Progress rendering is still attempted and still
+  throttled, and stops retrying as soon as it is known to be broken.
+- A mistyped mode (`/ub ai flash ...`) is now answered as a question, with a
+  one-line note about the mode that was probably meant. The suggestion only
+  fires on a single-edit near-miss: at two, "list", "note", "code" and "more"
+  would all be flagged, and commenting on an ordinary question is worse than
+  answering it.
 - A staged plugin path of `../x.py` or an absolute path is now rejected before
   anything is written, and the resolved location is re-checked against the
   staging root afterwards.
