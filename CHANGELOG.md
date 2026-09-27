@@ -4,7 +4,7 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-27
 
 ### Fixed
 
@@ -51,6 +51,15 @@ Also fixed:
   by commit SHA, which carries no ordering.
 - A revoked session no longer leaves the session lock held, which made the next
   start fail with a bogus "another process" error.
+- yt-dlp's `impersonate` option was passed as a string. yt-dlp only converts the
+  string form in its CLI entry point, which this project does not use, so
+  `YoutubeDL.__init__` raised `AssertionError` and **every** download failed.
+  The option is now an `ImpersonateTarget`, and impersonation degrades to a
+  warning when `curl-cffi` is missing rather than crashing.
+- `PluginManager.shutdown()` was not authoritative: a `/ub plugin install` that
+  was in flight could publish its runtime *after* shutdown had snapshotted the
+  loaded names, leaving that plugin's commands and handlers live. Shutdown now
+  sets a flag that refuses late loads and waits for in-flight work first.
 - `gateway.connect()` no longer passes `catch_up` to `TelegramClient.connect()`,
   which takes no arguments in Telethon 1.45 and crashed the service on every
   start. Catch-up is a constructor option (`catch_up=True`, since Telethon
@@ -111,6 +120,16 @@ Also fixed:
 
 ### Added
 
+- Failure alerting: `OnFailure=` runs `deploy/alert.sh` once systemd gives up
+  restarting, sending the journal excerpt to `TGUSERBOT_ALERT_CHAT`. Without a
+  chat ID the hook exits quietly.
+- Liveness supervision: the unit is `Type=notify` with `WatchdogSec=60`, pinged
+  from the same tick as the heartbeat file, so a wedged process is restarted
+  rather than sitting there looking healthy. Previously the heartbeat had a
+  producer and no consumer.
+- Structural types for the plugin boundary: `ctx.client`, `ctx.dispatcher` and
+  `ctx.manager` are `Protocol`s, so mypy verifies plugin code instead of
+  reporting success on `Any`.
 - Per-plugin configuration: `[config]` in `plugin.toml` for defaults and
   `<data_dir>/plugin-config.toml` for per-installation overrides, with typed
   accessors and a type check at load time.
@@ -128,7 +147,13 @@ Also fixed:
 
 ### Changed
 
-- Test coverage from 54% to 90%, with a hard floor of 85%. `git_source.py`, the
+- `requirements.lock` now carries hashes, which means it no longer contains the
+  editable `-e .` line (a local directory cannot be hashed). The install scripts
+  do the two steps separately: `--require-hashes` for dependencies, then
+  `--no-deps -e .` for the project.
+- `uv.lock` is regenerated and a test fails if it drifts from `pyproject.toml`
+  again; four dev dependencies had been added without updating it.
+- Test coverage from 54% to 91%, with a hard floor of 85%. `git_source.py`, the
   most security-relevant module, had no tests at all.
 - Tests are hermetic: they build their own plugin trees instead of loading the
   repository's `plugins/`, and no longer depend on the working directory.

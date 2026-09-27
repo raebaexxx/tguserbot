@@ -135,5 +135,19 @@ To inspect or change the configuration the bot actually sees:
   large file is RAM, not disk.
 - The session file is protected by a `flock`, so a second `userbot run` against
   the same data directory fails immediately instead of corrupting the auth key.
-- A heartbeat file is refreshed under `/var/lib/tguserbot` while the process is
-  healthy, for external monitoring.
+- `Type=notify` with `WatchdogSec=60`. The process pings systemd from the same
+  tick that refreshes the heartbeat file under `/var/lib/tguserbot`, so a wedged
+  plugin or a starved event loop is restarted within a minute instead of leaving
+  a service that looks healthy and answers nothing.
+- `OnFailure=` runs `deploy/alert.sh` once systemd has given up restarting. Set
+  `TGUSERBOT_ALERT_CHAT` in `userbot.env` to a chat ID to be told; leave it
+  empty and the hook exits quietly.
+
+```bash
+# enable alerting
+sudoedit /etc/tguserbot/userbot.env   # TGUSERBOT_ALERT_CHAT=123456789
+sudo systemctl daemon-reload
+```
+
+The alert uses its own session file (`alert-session`) under the data directory,
+so it cannot collide with the running bot's session lock.

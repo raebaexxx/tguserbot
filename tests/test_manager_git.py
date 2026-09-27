@@ -6,6 +6,7 @@ fetch → stage → load → record → prune pipeline is exercised.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import textwrap
 from pathlib import Path
@@ -368,3 +369,82 @@ async def test_a_missing_staged_revision_is_reported_not_fatal(
         await manager2.shutdown()
         await storage2.close()
     assert client is not None
+
+
+@requires_git
+async def test_two_concurrent_installs_do_not_corrupt_each_other(
+    tmp_path: Path, origin: Path, plugin_root: Path
+) -> None:
+    """A double tap on /ub plugin install must not leave a half-loaded plugin.
+
+    Both fetches run; the loads are serialized per plugin, so the end state has
+    to be a single, fully working runtime with one command registered.
+    """
+    commit_plugin(origin, "remote_demo", version="0.1.0", command="rtdemo")
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
+    try:
+        results = await asyncio.gather(
+            manager.install_git(str(origin), "main"),
+            manager.install_git(str(origin), "main"),
+            return_exceptions=True,
+        )
+        failures = [r for r in results if isinstance(r, BaseException)]
+        assert not failures, f"a concurrent install failed: {failures!r}"
+        assert manager.active_count() == 1
+        runtime = manager.get_runtime("remote_demo")
+        assert runtime is not None
+        assert runtime.manifest.version == "0.1.0"
+        # Exactly one registration, not two competing ones.
+        registrations = [c for c in dispatcher.commands() if c.name == "rtdemo"]
+        assert len(registrations) == 1
+        assert registrations[0].callback.__self__.__class__.__module__ == (
+            f"{runtime.loaded.module.__name__}.plugin"
+        )
+        state = await storage.get_plugin_state("remote_demo")
+        assert state is not None
+        assert state["status"] == "active"
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
+@requires_git
+async def test_install_during_shutdown_ends_consistently(
+    tmp_path: Path, origin: Path, plugin_root: Path
+) -> None:
+    """An install interrupted by shutdown must not strand a live context."""
+    commit_plugin(origin, "remote_demo", version="0.1.0", command="rtdemo")
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
+    try:
+        install = asyncio.create_task(manager.install_git(str(origin), "main"))
+        await asyncio.sleep(0)
+        manager.set_shutdown_timeout(0.3)
+        await manager.shutdown()
+        await asyncio.gather(install, return_exceptions=True)
+        assert manager.active_count() == 0
+        assert dispatcher.commands() == [], "a command survived shutdown"
+    finally:
+        await storage.close()
+
+
+@requires_git
+async def test_disabling_then_restarting_keeps_the_disabled_state(
+    tmp_path: Path, origin: Path, plugin_root: Path
+) -> None:
+    """A disabled Git plugin must stay disabled across a restart."""
+    commit_plugin(origin, "remote_demo", version="0.1.0", command="rtdemo")
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
+    await manager.install_git(str(origin), "main")
+    await manager.disable("remote_demo")
+    await manager.shutdown()
+    await storage.close()
+
+    manager2, storage2, client2, dispatcher2 = await build_manager(tmp_path, plugin_root)
+    try:
+        await manager2.initialize_state()
+        await manager2.load_all_local()
+        assert manager2.get_runtime("remote_demo") is None
+        assert dispatcher2.commands() == []
+    finally:
+        await manager2.shutdown()
+        await storage2.close()

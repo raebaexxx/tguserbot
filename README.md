@@ -72,6 +72,7 @@ comments. The ones worth knowing:
 | `TGUSERBOT_WATCH_INTERVAL` | `2.0` | Seconds between directory scans. The scan reads file metadata and only re-hashes a plugin whose size or mtime changed. |
 | `TGUSERBOT_COMMAND_TIMEOUT` | `120` | Seconds a `/ub` command may run before it is reported as timed out. |
 | `TGUSERBOT_LOG_JSON` | `0` | Set to `1` for one JSON object per log line. |
+| `TGUSERBOT_ALERT_CHAT` | empty | Chat ID to notify when the service dies and systemd stops restarting it. |
 | `TGUSERBOT_GIT_ALLOWED_REPOS` | empty | Exact repository URLs accepted by the Git plugin source. |
 
 `owner_ids` is the whole authorisation surface of the bot, and the logged-in

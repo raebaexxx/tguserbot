@@ -48,12 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Bash syntax
-        run: bash -n userbotctl deploy/install.sh
+        run: bash -n userbotctl deploy/install.sh deploy/alert.sh
       - name: ShellCheck
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends shellcheck
-          shellcheck -S style userbotctl deploy/install.sh
+          shellcheck -S style userbotctl deploy/install.sh deploy/alert.sh
 
   supply-chain:
     runs-on: ubuntu-latest

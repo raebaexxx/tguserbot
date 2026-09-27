@@ -92,6 +92,11 @@ install_configuration() {
 install_unit() {
   install -o root -g root -m 644 \
     "${APP_DIR}/deploy/systemd/${SERVICE_NAME}" "/etc/systemd/system/${SERVICE_NAME}"
+  # The OnFailure= target: a template unit, so systemd can instantiate it per
+  # failed service name.
+  install -o root -g root -m 644 \
+    "${APP_DIR}/deploy/systemd/tguserbot-alert@.service" \
+    "/etc/systemd/system/tguserbot-alert@.service"
   rm -f /usr/local/bin/tguserbotctl
   ln -s "${APP_DIR}/userbotctl" /usr/local/bin/tguserbotctl
   systemctl daemon-reload

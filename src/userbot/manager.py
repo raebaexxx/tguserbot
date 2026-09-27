@@ -75,6 +75,7 @@ class PluginManager:
         self._idle.set()
         self._generation = 0
         self._shutdown_timeout = DEFAULT_SHUTDOWN_TIMEOUT
+        self._shutting_down = False
         self._git_source = GitPluginSource(settings)
         try:
             self.config_store = PluginConfigStore(settings.plugin_config_path)
@@ -279,6 +280,12 @@ class PluginManager:
         if name in self._disabled:
             return None
         async with self._lock:
+            # Shutdown snapshots the loaded names once. A load that started
+            # before the flag was set but reaches this point afterwards would
+            # publish a runtime nobody will ever unload, leaving its commands and
+            # handlers live in a process that is going away.
+            if self._shutting_down:
+                raise PluginLoadError(f"Плагин {name!r} не загружен: бот завершается")
             old = self._runtimes.get(name)
             if old is not None and not force:
                 return old
@@ -680,14 +687,18 @@ class PluginManager:
     # -- shutdown -----------------------------------------------------------
 
     async def shutdown(self) -> None:
+        """Unload every plugin. Authoritative: nothing loads after this returns."""
+        self._shutting_down = True
         names = tuple(self._runtimes)
         if not names:
             return
         self.logger.info("Unloading %d plugin(s)", len(names))
-        # One shared deadline for the whole shutdown: plugins unload in parallel,
-        # and a plugin that ignores cancellation can no longer push the process
-        # past systemd's TimeoutStopSec.
         deadline = asyncio.get_running_loop().time() + self._shutdown_timeout
+        # Let an in-flight load finish or fail before snapshotting the names,
+        # otherwise a load that started earlier can register after this point.
+        if not await self.wait_idle(self._shutdown_timeout * 0.3):
+            self.logger.warning("plugin operations still in flight after %.1fs", deadline)
+        names = tuple(self._runtimes)
         results = await asyncio.gather(
             *(self._safe_unload(name, deadline) for name in names), return_exceptions=True
         )

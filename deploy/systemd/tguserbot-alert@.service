@@ -1,0 +1,24 @@
+[Unit]
+Description=Notify the owner that %i failed
+# Triggered by the main unit's OnFailure=, never started directly.
+ConditionPathExists=/etc/tguserbot/userbot.env
+
+[Service]
+Type=oneshot
+User=tguserbot
+Group=tguserbot
+WorkingDirectory=/opt/tguserbot
+# The failed process may still hold the session lock; give systemd a moment to
+# reap it before opening a second client on the same data directory.
+ExecStartPre=/bin/sleep 5
+ExecStart=/opt/tguserbot/deploy/alert.sh %i
+# A failed alert must not retry forever.
+TimeoutStartSec=60
+Restart=no
+# Deliberately weaker sandbox than the main service: it only needs the journal,
+# the environment file, and its own session.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tguserbot

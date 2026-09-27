@@ -55,5 +55,10 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # (already present) -- the watcher needs no further access.
 ReadWritePaths=/var/lib/tguserbot
 
+# systemd gives up after StartLimitBurst failures and the bot then stays down
+# silently. Notify the owner first, then let systemd do its job. Set
+# TGUSERBOT_ALERT_CHAT in userbot.env to enable; without it the hook exits 0.
+OnFailure=tguserbot-alert@%n.service
+
 [Install]
 WantedBy=multi-user.target

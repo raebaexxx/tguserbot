@@ -50,7 +50,13 @@ DOCUMENTED_ENV_VARS = {
     "TGUSERBOT_FLOOD_THRESHOLD",
     "TGUSERBOT_MIN_INTERVAL",
     "TGUSERBOT_GIT_ALLOWED_REPOS",
+    "TGUSERBOT_ALERT_CHAT",
 }
+
+#: Settings consumed by the shell helpers rather than by Python. They must still
+#: be documented, and they are read through `sed` on the environment file, so no
+#: Python-level scan can see them.
+SHELL_SETTINGS = {"TGUSERBOT_ALERT_CHAT"}
 
 
 def test_env_example_covers_every_documented_variable() -> None:
@@ -71,6 +77,21 @@ def test_every_env_var_the_code_reads_is_documented() -> None:
     )
     used = {name for name in used if name.startswith("TGUSERBOT_")}
     assert used <= DOCUMENTED_ENV_VARS, f"undocumented: {sorted(used - DOCUMENTED_ENV_VARS)}"
+
+
+def test_every_setting_the_shell_reads_is_documented() -> None:
+    """alert.sh pulls values out of userbot.env with sed; nothing else sees them."""
+    for script in (REPO_ROOT / "deploy" / "alert.sh", REPO_ROOT / "userbotctl"):
+        used = set(re.findall(r"TGUSERBOT_[A-Z_]+", script.read_text(encoding="utf-8")))
+        # These are wrapper-scoped knobs, not settings the bot itself reads.
+        used -= {
+            "TGUSERBOT_APP_DIR",
+            "TGUSERBOT_REPO_URL",
+            "TGUSERBOT_SERVICE_USER",
+            "TGUSERBOT_ENV_FILE",
+        }
+        undocumented = used - set(DOCUMENTED_ENV_VARS)
+        assert not undocumented, f"{script.name} reads undocumented settings: {undocumented}"
 
 
 def test_readme_table_lists_only_real_settings() -> None:
@@ -95,7 +116,7 @@ def test_readme_table_lists_only_real_settings() -> None:
     documented = set(re.findall(r"\| `(TGUSERBOT_[A-Z_]+)`", read(README)))
     unknown = documented - set(DOCUMENTED_ENV_VARS)
     assert not unknown, f"README documents settings that do not exist: {sorted(unknown)}"
-    for name in documented:
+    for name in documented - SHELL_SETTINGS:
         field = env_to_field.get(name, name.removeprefix("TGUSERBOT_").lower())
         assert field in fields, f"{name} has no backing Settings field ({field})"
     # The table is the quick reference, so it is expected to name several.
@@ -280,10 +301,22 @@ def test_plugin_doc_names_the_stable_import_path() -> None:
 # --- release hygiene -------------------------------------------------------
 
 
-def test_changelog_exists_and_has_an_unreleased_section() -> None:
+def test_changelog_heading_matches_the_package_version() -> None:
+    """A version bump with an unreleased changelog, or vice versa, misleads users."""
+    import re as _re
+
+    from userbot import __version__
+
     text = read(CHANGELOG)
-    assert "## [Unreleased]" in text
     assert "### Fixed" in text
+    assert "### Migration" in text, "the per-plugin data move must stay documented"
+    first = _re.search(r"^## \[([^\]]+)\]", text, _re.M)
+    assert first, "no release heading in the changelog"
+    heading = first.group(1)
+    assert heading != "Unreleased", (
+        f"the changelog still has an Unreleased section but the version is {__version__}"
+    )
+    assert __version__ in heading, f"changelog head is {heading!r} but pyproject says {__version__}"
 
 
 def test_changelog_documents_the_data_migration() -> None:
