@@ -721,3 +721,43 @@ def test_the_application_directory_is_not_owned_by_the_service_user() -> None:
     assert '"${APP_DIR}" "${DATA_DIR}"' not in line.group(0), (
         "APP_DIR and DATA_DIR must not share one install -d: they need different owners"
     )
+
+
+def test_the_recovery_clears_a_failed_unit_state() -> None:
+    """`systemctl start` refuses a unit that tripped the start rate limiter.
+
+    Once `StartLimitBurst` is hit, systemd answers "Start request repeated too
+    quickly" with result `start-limit-hit` and keeps answering that way, so every
+    recovery attempt fails for a reason that has nothing to do with the code. The
+    bot stays down until someone knows to type `systemctl reset-failed` by hand.
+
+    Reached here in practice: several updates in a row, each stopping and
+    starting the unit, tripped the limiter, and the rollback that was supposed to
+    bring the service back could not start it at all. The installer already
+    clears this; the update path has to as well.
+    """
+    helper = _rollback_body()
+    assert "reset-failed" in helper, (
+        "the recovery has to clear start-limit-hit, or it cannot start the "
+        f"service it is trying to restore:\n{helper}"
+    )
+    installer = INSTALL.read_text(encoding="utf-8")
+    assert "reset-failed" in installer, "the installer is the reference implementation"
+
+
+def test_the_rollback_does_not_silently_discard_local_edits() -> None:
+    """`git reset --hard` throws away uncommitted work with no warning.
+
+    The checkout is meant to be managed by `tguserbotctl update`, but an operator
+    who edits a file on the server — and a hotfix applied under pressure is
+    exactly that — loses it on the first failed update, and the file reverts
+    without a word. It also undoes the very script doing the rollback, which is
+    how a hand-installed fix disappears: observed, not hypothetical.
+    """
+    helper = _rollback_body()
+    assert "reset --hard" in helper, (
+        "the rollback still has to move the branch, so this is about warning"
+    )
+    assert re.search(r"status --porcelain", helper), (
+        "an uncommitted change has to be noticed before it is discarded"
+    )

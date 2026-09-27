@@ -286,6 +286,19 @@ rollback_and_start() {
   local previous="${1:-}"
   local branch="${2:-}"
   if [ -n "${previous}" ]; then
+    # `reset --hard` throws away anything uncommitted, silently. That is how a
+    # hand-applied fix on the server disappears -- including the script doing the
+    # rollback, which is not hypothetical: it was observed reverting a fix to the
+    # old committed version of itself, and then failing for that reason. Say so
+    # before discarding, and keep a copy.
+    local dirty
+    dirty="$(git -C "${APP_DIR}" status --porcelain 2>/dev/null || true)"
+    if [ -n "${dirty}" ]; then
+      echo "В рабочем дереве есть незакоммиченные изменения; они будут отброшены:" >&2
+      echo "${dirty}" | head -10 >&2
+      git -C "${APP_DIR}" diff > "/root/tguserbot-uncommitted-$(date -u +%Y%m%dT%H%M%SZ).patch" 2>/dev/null || true
+      echo "Копия: /root/tguserbot-uncommitted-*.patch" >&2
+    fi
     if [ -n "${branch}" ] && [ "${branch}" != "HEAD" ]; then
       # Return to the branch and move it, rather than checking the commit out.
       # `git checkout <sha>` detaches HEAD, and `git pull` in a detached HEAD
@@ -298,6 +311,11 @@ rollback_and_start() {
     fi
     "${PYTHON}" -m pip install --no-deps -e "${APP_DIR}" 2>/dev/null || true
   fi
+  # A unit that tripped systemd's start rate limiter answers "Start request
+  # repeated too quickly" and keeps answering that way, so the restart below
+  # fails for a reason unrelated to the code and the bot stays down. The
+  # installer clears this; the update path has to as well.
+  systemctl_cmd reset-failed "${SERVICE_NAME}" 2>/dev/null || true
   systemctl_cmd restart "${SERVICE_NAME}" || systemctl_cmd start "${SERVICE_NAME}" || true
 }
 
