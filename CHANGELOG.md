@@ -37,12 +37,15 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   beyond a plain text message is passed to telethon untouched, rather than partly
   handled and partly dropped.
 
-  Partial by necessity, and the limit is now documented: a message posted fresh
-  inside a topic arrives from Telegram with **no** topic marker, so a command
-  sent that way cannot be attributed to a topic. Commands sent as a reply inside
-  a topic are followed into it. Which thread was chosen is logged on every
-  reply, because the first report of this was twice diagnosed by guesswork
-  before the event's real shape was read off a live forum.
+  A fresh message in a topic turned out to be a second reading of the same
+  header, not a missing one: Telegram sets `reply_to_top_id` only on a message
+  that is itself a reply, and a message posted fresh in a topic points at the
+  topic's root with `forum_topic` set instead. The first attempt read only
+  `reply_to_top_id`, concluded the topic was unknowable, and shipped a fix that
+  only covered replies. Both forms are read now, and the flag is what keeps an
+  ordinary reply in a plain group from being mistaken for a topic. Which thread
+  was chosen is logged on every reply, because the first report of this was
+  diagnosed twice by guesswork before the real header was read off a live forum.
 - **`/ub ai <question>` sent the placeholder and then nothing.** Every delivery
   path went through `placeholder.edit_text()` -- the progress updates, the final
   answer, and even the "the model returned no text" notice -- so when the

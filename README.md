@@ -182,24 +182,25 @@ request with the topic set, on both reply paths -- commands in the dispatcher,
 raw event handlers in `PluginContext`. Plugins need do nothing, and
 `event.underlying` reaches the real event.
 
-There is a limit worth knowing, because it is not the bot's to lift. Measured on
-a live forum:
+Telegram marks a topic in two different ways, and only reading the first makes
+a freshly posted message look like it has no topic. From a live forum:
 
 ```
-id=1085586  reply_to=None                            'Как вы?'   <- typed in a topic
-id=1085583  reply_to=MessageReplyHeader top_msg_id=1085403           <- reply in a topic
+id=40887 '/ub version'  forum_topic=True reply_to_msg_id=60   reply_to_top_id=None
+id=40892 'да'            forum_topic=True reply_to_msg_id=40885 reply_to_top_id=60
 ```
 
-A message posted **fresh** inside a topic arrives with no topic marker at all.
-Only a message that is itself a reply carries one. So a command sent as a new
-message in a topic cannot be attributed to that topic -- Telegram does not say
-which topic, and guessing from recency would put answers in the wrong thread
-more often than not. **Send the command as a reply to a message inside the
-topic and the answer follows it there.** Which thread was chosen is written to
-the journal on every reply, so this is never a matter of guesswork:
+`reply_to_top_id` is set only on a message that is itself a *reply*. A message
+posted fresh in a topic points at the topic's **root** instead and flags itself
+with `forum_topic`. So the topic is `reply_to_top_id` when present, and
+`reply_to_msg_id` when `forum_topic` says so -- the flag is what keeps an
+ordinary reply in a plain group from being mistaken for a topic.
+
+Which thread was chosen is written to the journal on every reply, so this is
+never a matter of guesswork:
 
 ```
-INFO userbot.topics: replying in topic 1085403
+INFO userbot.topics: replying in topic 60
 INFO userbot.topics: replying in main thread (no topic on the message)
 ```
 

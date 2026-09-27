@@ -552,3 +552,115 @@ async def test_a_fresh_topic_message_gets_a_plain_reply(topics: Any) -> None:
     await topics.respond_in_topic(event, "привет")
     assert event.client.requests == []
     assert event.respond_calls == [("привет", {})]
+
+
+# --- the real shape, from a live forum --------------------------------------
+#
+# Read off the actual chat the bug was reported in (Fuxilover's Warehouse,
+# 3738198858), message 40887 -- the `/ub version` that went astray:
+#
+#   reply_to={..., 'forum_topic': True, 'reply_to_msg_id': 60,
+#             'reply_to_top_id': None, ...}
+#
+# A message posted fresh in a topic has a reply header after all. What it lacks
+# is `reply_to_top_id`: the topic is the *root* the header points at instead,
+# flagged by `forum_topic`. Reading only `top_msg_id` -- as the first attempt
+# did -- found nothing and concluded the topic was unknowable. It was on the
+# message the whole time.
+#
+# A reply inside a topic carries both, and they agree:
+#
+#   id=40892  'да'  reply_to_msg_id=40885  reply_to_top_id=60
+#
+# And an ordinary reply in a plain group must not be mistaken for a topic:
+#
+#   forum_topic=False  reply_to_msg_id=42  reply_to_top_id=None
+
+
+class RealHeader:
+    """A MessageReplyHeader as Telethon actually fills it in."""
+
+    def __init__(
+        self,
+        *,
+        forum_topic: bool = False,
+        reply_to_msg_id: int = 0,
+        reply_to_top_id: int | None = None,
+    ) -> None:
+        self.forum_topic = forum_topic
+        self.reply_to_msg_id = reply_to_msg_id
+        self.reply_to_top_id = reply_to_top_id
+
+
+class WithHeader(FakeEvent):
+    def __init__(self, header: Any, message_id: int = 40887) -> None:
+        super().__init__(top=None, message_id=message_id)
+        self.reply_to = header
+        self.message = None
+
+
+def test_a_fresh_message_in_a_topic_is_found_by_its_root(topics: Any) -> None:
+    """The reported bug, with the message the report was about."""
+    event = WithHeader(RealHeader(forum_topic=True, reply_to_msg_id=60, reply_to_top_id=None))
+    assert topics.topic_of(event) == 60
+    spec = topics.reply_spec(event)
+    assert spec is not None
+    assert spec.top_msg_id == 60
+    assert spec.reply_to_msg_id == 40887, "it must still reply to the command message"
+
+
+def test_a_reply_in_a_topic_uses_top_msg_id(topics: Any) -> None:
+    event = WithHeader(RealHeader(forum_topic=True, reply_to_msg_id=40885, reply_to_top_id=60))
+    assert topics.topic_of(event) == 60
+
+
+def test_a_plain_group_reply_is_not_a_topic(topics: Any) -> None:
+    """reply_to_msg_id alone must never be read as a topic."""
+    event = WithHeader(RealHeader(forum_topic=False, reply_to_msg_id=42, reply_to_top_id=None))
+    assert topics.topic_of(event) is None
+    assert topics.reply_spec(event) is None
+
+
+def test_a_header_without_the_flag_is_not_a_topic(topics: Any) -> None:
+    """Old servers may omit forum_topic entirely; absence is not a yes."""
+
+    class Bare:
+        reply_to_msg_id = 60
+        reply_to_top_id = None
+
+    assert topics.topic_of(WithHeader(Bare())) is None
+
+
+def test_top_msg_id_wins_over_the_root(topics: Any) -> None:
+    """When both are present they agree, and top_msg_id is the documented field."""
+    event = WithHeader(RealHeader(forum_topic=True, reply_to_msg_id=40885, reply_to_top_id=60))
+    assert topics.topic_of(event) == 60
+
+
+def test_the_general_topic_is_not_mistaken_for_a_root(topics: Any) -> None:
+    """Topic 1 is General; a reply to message 1 outside a topic means nothing."""
+    event = WithHeader(RealHeader(forum_topic=False, reply_to_msg_id=1, reply_to_top_id=None))
+    assert topics.topic_of(event) is None
+
+
+async def test_the_reported_command_replies_into_its_topic(topics: Any) -> None:
+    """The whole fix, end to end on the message from the bug report."""
+    from userbot.commands import CommandDispatcher
+
+    dispatcher = CommandDispatcher({1})
+    event = WithHeader(RealHeader(forum_topic=True, reply_to_msg_id=60, reply_to_top_id=None))
+    event.raw_text = "/ub version"
+    event.sender_id = 1
+    event.message = None
+    dispatcher.register("version", _reply_with_command_response)
+
+    await dispatcher.handle_event(event)
+
+    assert len(event.client.requests) == 1, event.respond_calls
+    assert event.client.requests[0].reply_to.top_msg_id == 60
+    assert event.respond_calls == []
+
+
+def test_the_decision_names_the_discovered_topic(topics: Any) -> None:
+    event = WithHeader(RealHeader(forum_topic=True, reply_to_msg_id=60, reply_to_top_id=None))
+    assert topics.describe(event) == "topic 60"

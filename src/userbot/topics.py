@@ -49,13 +49,27 @@ def _is_plain_text(text: str | None, kwargs: dict[str, Any]) -> bool:
 
 
 def topic_of(event: Any) -> int | None:
-    """The forum topic an event belongs to, or ``None`` when Telegram said nothing.
+    """The forum topic an event belongs to, or ``None`` outside a topic.
 
-    Observed on a live forum, and the limit matters: a message posted fresh
-    inside a topic arrives with **no** topic marker, while a message that is
-    itself a reply carries ``reply_to_top_id``. There is no third source, so a
-    command typed as a new message in a topic cannot be attributed to that topic
-    -- the update simply does not say which one.
+    Telegram describes a topic in two ways, and reading only the first one makes
+    a fresh message in a topic look like it has no topic at all.
+
+    From a live forum, the ``/ub version`` that was reported going astray::
+
+        reply_to={..., 'forum_topic': True, 'reply_to_msg_id': 60,
+                  'reply_to_top_id': None, ...}
+
+    ``reply_to_top_id`` is set only on a message that is itself a *reply*. A
+    message posted fresh in a topic instead points at the topic's root message
+    and flags itself with ``forum_topic``. So:
+
+    * ``reply_to_top_id`` when present -- the explicit field, and a reply inside a
+      topic carries it;
+    * otherwise ``reply_to_msg_id``, but only when ``forum_topic`` says so.
+
+    The flag is what makes the fallback safe. Without it, ``reply_to_msg_id`` is
+    just "the message being replied to", and treating that as a topic would put
+    every ordinary reply in a plain group into a made-up thread.
 
     Topic 1 is "General" and is returned like any other: a message in General
     still belongs to a specific topic, and treating it as "no topic" is how
@@ -64,13 +78,24 @@ def topic_of(event: Any) -> int | None:
     header = getattr(event, "reply_to", None)
     if header is None:
         return None
+
     top = getattr(header, "reply_to_top_id", None)
-    if top is None:
+    if top is not None:
+        try:
+            return int(top)
+        except (TypeError, ValueError):
+            return None
+
+    if not getattr(header, "forum_topic", False):
+        return None
+    root = getattr(header, "reply_to_msg_id", None)
+    if root is None:
         return None
     try:
-        return int(top)
+        value = int(root)
     except (TypeError, ValueError):
         return None
+    return value or None
 
 
 def describe(event: Any) -> str:
