@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .health import HealthService
+from .plugin_config import PluginConfig
 from .rate_limit import RateLimiter
 from .storage import PluginStorage, Storage
 from .task_registry import TaskGroup
@@ -118,6 +119,7 @@ class PluginContext:
         instance: Any,
         logger: logging.Logger,
         core_storage: Storage | None = None,
+        config: PluginConfig | None = None,
     ):
         self.plugin_name = plugin_name
         self.path = plugin_path
@@ -125,6 +127,9 @@ class PluginContext:
         self.settings = settings
         #: Sandboxed per-plugin database. Never the core bookkeeping database.
         self.storage = storage
+        #: Effective settings: the plugin's manifest defaults merged with the
+        #: operator's overrides from ``plugin-config.toml``.
+        self.config = config if config is not None else PluginConfig(plugin_name=plugin_name)
         self.dispatcher = dispatcher
         self.rate_limiter = rate_limiter
         self.health = health

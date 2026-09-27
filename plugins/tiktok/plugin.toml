@@ -4,3 +4,12 @@ api = "1"
 entrypoint = "plugin:Plugin"
 description = "Download a public TikTok video, send it, and remove the command"
 schema_version = 1
+
+# Defaults, overridable per installation in <data_dir>/plugin-config.toml:
+#
+#   [tiktok]
+#   max_file_mib = 100
+#   allowed_domains = ["tiktok.com", "tiktokv.com"]
+[config]
+max_file_mib = 50
+allowed_domains = ["tiktok.com", "tiktokv.com"]

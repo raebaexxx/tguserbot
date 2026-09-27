@@ -2,5 +2,12 @@ name = "notes"
 version = "0.1.0"
 api = "1"
 entrypoint = "plugin:Plugin"
-description = "Per-chat notes stored in SQLite"
+description = "Per-chat notes stored in a per-plugin SQLite sandbox"
 schema_version = 1
+
+# Defaults, overridable in <data_dir>/plugin-config.toml:
+#
+#   [notes]
+#   page_size = 50
+[config]
+page_size = 20

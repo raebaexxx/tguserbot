@@ -12,6 +12,7 @@ from .health import HealthService
 from .loader import PluginLoadError, cleanup_loaded_plugin, load_plugin
 from .logging import get_logger
 from .plugin_api import PluginContext, validate_plugin_interface
+from .plugin_config import PluginConfigError, PluginConfigStore
 from .storage import PluginStorage, Storage, create_plugin_storage
 from .task_registry import run_uninterruptible
 
@@ -75,6 +76,17 @@ class PluginManager:
         self._generation = 0
         self._shutdown_timeout = DEFAULT_SHUTDOWN_TIMEOUT
         self._git_source = GitPluginSource(settings)
+        try:
+            self.config_store = PluginConfigStore(settings.plugin_config_path)
+        except PluginConfigError as exc:
+            # A broken override file must be loud, but it must not stop the bot
+            # from booting: the plugins simply fall back to their defaults.
+            self.logger.error("Ignoring %s: %s", settings.plugin_config_path, exc)
+            self.config_store = PluginConfigStore(settings.plugin_config_path.parent / "__absent")
+        if self.config_store.overridden:
+            self.logger.info(
+                "Plugin settings overridden for: %s", ", ".join(self.config_store.overridden)
+            )
 
     # -- discovery ----------------------------------------------------------
 
@@ -234,6 +246,7 @@ class PluginManager:
         path: Path,
         instance: Any,
         logger: Any,
+        manifest: Any,
     ) -> PluginContext:
         plugin_storage = await create_plugin_storage(self.settings.plugin_data_dir, name)
         return PluginContext(
@@ -249,6 +262,7 @@ class PluginManager:
             instance=instance,
             logger=logger,
             core_storage=self.storage,
+            config=self.config_store.resolve(manifest),
         )
 
     async def _load_path(
@@ -281,6 +295,7 @@ class PluginManager:
                     path=path,
                     instance=loaded.instance,
                     logger=get_logger(f"plugin.{name}"),
+                    manifest=loaded.manifest,
                 )
                 await context.prepare(loaded.manifest.schema_version)
                 if old is not None:

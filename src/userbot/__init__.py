@@ -20,6 +20,7 @@ from .plugin_api import (
     PluginContractError,
     validate_plugin_interface,
 )
+from .plugin_config import PluginConfig, PluginConfigError
 from .rate_limit import RateLimiter
 from .storage import PluginStorage, SandboxedSqlError, StorageError
 from .task_registry import TaskGroup
@@ -32,6 +33,8 @@ __all__ = [
     "CommandContext",
     "HealthService",
     "Plugin",
+    "PluginConfig",
+    "PluginConfigError",
     "PluginContext",
     "PluginContractError",
     "PluginStorage",

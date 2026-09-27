@@ -5,9 +5,10 @@ import importlib.util
 import re
 import sys
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any
 
 
@@ -23,6 +24,8 @@ class PluginManifest:
     entrypoint: str
     description: str
     schema_version: int
+    #: Declarative defaults, overridable per plugin via config.toml.
+    config: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_path(cls, path: Path) -> PluginManifest:
@@ -48,6 +51,9 @@ class PluginManifest:
             raise PluginLoadError("schema_version must be an integer") from exc
         if not api or not entrypoint or schema_version < 1:
             raise PluginLoadError("Invalid plugin manifest values")
+        config = data.get("config", {})
+        if not isinstance(config, dict):
+            raise PluginLoadError("[config] in plugin.toml must be a table")
         return cls(
             name=name,
             version=version,
@@ -55,6 +61,7 @@ class PluginManifest:
             entrypoint=entrypoint,
             description=description,
             schema_version=schema_version,
+            config=MappingProxyType(config),
         )
 
 

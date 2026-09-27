@@ -92,6 +92,11 @@ class Settings:
         return self.data_dir / "plugin-data"
 
     @property
+    def plugin_config_path(self) -> Path:
+        """Operator overrides for per-plugin settings."""
+        return self.data_dir / "plugin-config.toml"
+
+    @property
     def heartbeat_path(self) -> Path:
         return self.data_dir / "heartbeat"
 

@@ -18,8 +18,12 @@ from userbot.plugin_api import Plugin as BasePlugin
 from userbot.plugin_api import PluginContext
 
 #: Refuse anything larger; checked during the download, not only afterwards.
-MAX_FILE_SIZE = 50 * 1024 * 1024
-ALLOWED_DOMAINS = ("tiktok.com", "tiktokv.com")
+#: Overridable via ``[tiktok] max_file_mib`` in plugin-config.toml.
+DEFAULT_MAX_FILE_MIB = 50
+
+#: Hosts accepted. Overridable via ``[tiktok] allowed_domains``.
+DEFAULT_ALLOWED_DOMAINS = ("tiktok.com", "tiktokv.com")
+
 URL_PATTERN = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 DIRECT_COMMAND_PATTERN = re.compile(
     r"^/tt(?:@[^\s]+)?(?:\s+([\s\S]*))?$",
@@ -103,13 +107,11 @@ def _remove_tree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def _is_tiktok_host(hostname: str | None) -> bool:
+def _is_tiktok_host(hostname: str | None, allowed: tuple[str, ...]) -> bool:
     if not hostname:
         return False
     normalized = hostname.rstrip(".").lower()
-    return any(
-        normalized == domain or normalized.endswith(f".{domain}") for domain in ALLOWED_DOMAINS
-    )
+    return any(normalized == domain or normalized.endswith(f".{domain}") for domain in allowed)
 
 
 def _format_bytes(value: int | None) -> str:
@@ -140,7 +142,10 @@ def _format_progress(state: _ProgressState) -> str:
     return "\n".join(lines)
 
 
-def extract_tiktok_url(text: str) -> str:
+def extract_tiktok_url(
+    text: str,
+    allowed_domains: tuple[str, ...] = DEFAULT_ALLOWED_DOMAINS,
+) -> str:
     matches = URL_PATTERN.findall(text)
     if len(matches) != 1:
         raise TikTokDownloadError("Нужна ровно одна ссылка TikTok.")
@@ -156,7 +161,7 @@ def extract_tiktok_url(text: str) -> str:
         raise TikTokDownloadError("Поддерживаются только HTTPS-ссылки TikTok.")
     if parsed.username or parsed.password or port not in (None, 443):
         raise TikTokDownloadError("Некорректная ссылка TikTok.")
-    if not _is_tiktok_host(parsed.hostname):
+    if not _is_tiktok_host(parsed.hostname, allowed_domains):
         raise TikTokDownloadError("Поддерживаются только ссылки tiktok.com.")
     return url
 
@@ -166,11 +171,22 @@ class Plugin(BasePlugin):
         self.ctx: PluginContext | None = None
         self.download_lock: asyncio.Lock | None = None
         self.progress_lock: asyncio.Lock | None = None
+        self.max_file_size: int = DEFAULT_MAX_FILE_MIB * 1024 * 1024
+        self.allowed_domains: tuple[str, ...] = DEFAULT_ALLOWED_DOMAINS
 
     async def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
         self.download_lock = asyncio.Lock()
         self.progress_lock = asyncio.Lock()
+        self.max_file_size = (
+            ctx.config.int_value("max_file_mib", DEFAULT_MAX_FILE_MIB) * 1024 * 1024
+        )
+        self.allowed_domains = tuple(
+            domain.lower()
+            for domain in ctx.config.str_list("allowed_domains", DEFAULT_ALLOWED_DOMAINS)
+        )
+        if not self.allowed_domains:
+            raise ValueError("tiktok: allowed_domains must not be empty")
         ctx.register_command(
             "tt",
             self.handle_command,
@@ -200,7 +216,7 @@ class Plugin(BasePlugin):
             return
 
         try:
-            url = extract_tiktok_url(text)
+            url = extract_tiktok_url(text, self.allowed_domains)
         except TikTokDownloadError as exc:
             await self._show_error(event, str(exc))
             return
@@ -239,7 +255,7 @@ class Plugin(BasePlugin):
             await self._await_reporter(reporter)
             reporter = None
 
-            if video_path.stat().st_size > MAX_FILE_SIZE:
+            if video_path.stat().st_size > self.max_file_size:
                 raise TikTokFileTooLarge
 
             await self._set_status(event, "✅ Скачано. Отправляю видео…")
@@ -301,7 +317,7 @@ class Plugin(BasePlugin):
                     eta = str(eta_value) if eta_value not in (None, "NA") else None
                     # Abort while the file is still growing: a post-download size
                     # check only runs after the disk is already full.
-                    if downloaded > MAX_FILE_SIZE:
+                    if downloaded > self.max_file_size:
                         stop.set()
                         raise TikTokFileTooLarge
                     values = (percent, downloaded, total, speed, eta)
@@ -338,7 +354,7 @@ class Plugin(BasePlugin):
             "merge_output_format": "mp4",
             "noplaylist": True,
             "max_downloads": 1,
-            "max_filesize": MAX_FILE_SIZE,
+            "max_filesize": self.max_file_size,
             "retries": RETRIES,
             "fragment_retries": RETRIES,
             "socket_timeout": SOCKET_TIMEOUT,

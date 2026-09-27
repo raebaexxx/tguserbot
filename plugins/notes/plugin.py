@@ -7,8 +7,9 @@ from userbot.storage import PluginStorage
 
 USAGE = "Использование:\n/ub notes add <текст>\n/ub notes list\n/ub notes delete <id>"
 
-#: How many notes a single ``list`` returns.
-PAGE_SIZE = 20
+#: How many notes a single ``list`` returns. Overridable via
+#: ``[notes] page_size`` in plugin-config.toml.
+DEFAULT_PAGE_SIZE = 20
 
 #: Telegram rejects longer text messages, so cap what we store.
 MAX_BODY_LENGTH = 4000
@@ -18,6 +19,10 @@ PREVIEW_LENGTH = 120
 
 
 class Plugin(BasePlugin):
+    def __init__(self) -> None:
+        self.ctx: PluginContext | None = None
+        self.page_size = DEFAULT_PAGE_SIZE
+
     async def migrate(self, storage: PluginStorage) -> None:
         await storage.execute(
             """
@@ -33,11 +38,18 @@ class Plugin(BasePlugin):
 
     async def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
+        self.page_size = max(1, ctx.config.int_value("page_size", DEFAULT_PAGE_SIZE))
         ctx.register_command(
             "notes",
             self.handle,
             help_text="add/list/delete заметки для текущего чата",
         )
+
+    @property
+    def storage(self) -> PluginStorage:
+        if self.ctx is None:
+            raise RuntimeError("notes: storage is only available after setup()")
+        return self.ctx.storage
 
     async def handle(self, command: CommandContext) -> None:
         parts = command.args.strip().split(maxsplit=1)
@@ -65,16 +77,16 @@ class Plugin(BasePlugin):
             await command.respond("Текст заметки не указан.")
             return
         body = argument[:MAX_BODY_LENGTH]
-        note_id = await self.ctx.storage.execute_insert(
+        note_id = await self.storage.execute_insert(
             "INSERT INTO notes (chat_id, body) VALUES (?, ?)",
             (chat_id, body),
         )
         await command.respond(f"Заметка #{note_id} сохранена.")
 
     async def _list(self, command: CommandContext, chat_id: str) -> None:
-        rows = await self.ctx.storage.fetchall(
+        rows = await self.storage.fetchall(
             "SELECT id, body, created_at FROM notes WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
-            (chat_id, PAGE_SIZE),
+            (chat_id, self.page_size),
         )
         if not rows:
             await command.respond("Заметок пока нет.")
@@ -91,7 +103,7 @@ class Plugin(BasePlugin):
         if not argument.isdigit():
             await command.respond("ID заметки должен быть числом.")
             return
-        deleted = await self.ctx.storage.execute(
+        deleted = await self.storage.execute(
             "DELETE FROM notes WHERE id = ? AND chat_id = ?",
             (int(argument), chat_id),
         )
