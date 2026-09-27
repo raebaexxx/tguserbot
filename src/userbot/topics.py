@@ -49,7 +49,13 @@ def _is_plain_text(text: str | None, kwargs: dict[str, Any]) -> bool:
 
 
 def topic_of(event: Any) -> int | None:
-    """The forum topic an event belongs to, or ``None`` outside a topic.
+    """The forum topic an event belongs to, or ``None`` when Telegram said nothing.
+
+    Observed on a live forum, and the limit matters: a message posted fresh
+    inside a topic arrives with **no** topic marker, while a message that is
+    itself a reply carries ``reply_to_top_id``. There is no third source, so a
+    command typed as a new message in a topic cannot be attributed to that topic
+    -- the update simply does not say which one.
 
     Topic 1 is "General" and is returned like any other: a message in General
     still belongs to a specific topic, and treating it as "no topic" is how
@@ -65,6 +71,19 @@ def topic_of(event: Any) -> int | None:
         return int(top)
     except (TypeError, ValueError):
         return None
+
+
+def describe(event: Any) -> str:
+    """The decision, in words, for the journal.
+
+    A reply that lands in the wrong thread is invisible from the outside, and
+    this bug cost two rounds of guessing because the log said nothing about which
+    thread had been chosen. The decision is now always readable.
+    """
+    topic = topic_of(event)
+    if topic is None:
+        return "main thread (no topic on the message)"
+    return f"topic {topic}"
 
 
 def reply_spec(event: Any) -> types.InputReplyToMessage | None:
@@ -94,6 +113,7 @@ async def respond_in_topic(event: Any, text: str | None = None, **kwargs: Any) -
     if unsupported:
         return await event.respond(text, **kwargs)
     spec = reply_spec(event)
+    logger.info("replying in %s", describe(event))
     if spec is None:
         return await event.respond(text, **kwargs)
 

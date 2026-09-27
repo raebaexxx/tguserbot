@@ -474,3 +474,81 @@ class SimpleDispatcher:
 
     def is_owner(self, sender_id: Any) -> bool:
         return sender_id in self.owner_ids
+
+
+# --- what Telegram actually sends ------------------------------------------
+#
+# Observed on a real forum, not guessed:
+#
+#   id=1085586  reply_to=None                            'Как вы?'    <- typed in a topic
+#   id=1085583  reply_to=MessageReplyHeader top_msg_id=1085403          <- reply in a topic
+#
+# A message posted fresh inside a topic arrives with no topic marker at all.
+# The topic id exists on the message only when the message is itself a reply.
+# That is a property of the API, and it caps what any bot can promise: with
+# nothing in the update, there is no topic to answer in.
+
+
+def test_a_fresh_message_in_a_topic_carries_no_marker(topics: Any) -> None:
+    assert topics.topic_of(FakeEvent(top=None)) is None
+
+
+def test_a_reply_in_a_topic_carries_the_marker(topics: Any) -> None:
+    spec = topics.reply_spec(FakeEvent(top=1085403, message_id=1085583))
+    assert spec is not None
+    assert spec.top_msg_id == 1085403
+    assert spec.reply_to_msg_id == 1085583
+
+
+def test_the_decision_is_reported_for_the_journal(topics: Any) -> None:
+    """A silently wrong thread is what made this hard to diagnose twice.
+
+    The decision -- which topic, or that Telegram sent none -- has to be
+    readable in the journal, or the next report is another round of guessing.
+    """
+    assert topics.describe(FakeEvent(top=77, message_id=42)) == "topic 77"
+    assert topics.describe(FakeEvent(top=None)) == "main thread (no topic on the message)"
+
+
+async def test_the_decision_is_logged_on_every_reply(topics: Any) -> None:
+    """The log line is the only evidence of which thread was chosen.
+
+    A handler is attached to the logger itself rather than using ``caplog``:
+    the project's logging setup stops the ``userbot`` loggers propagating, so a
+    test that depends on propagation passes alone and fails in a full run. That
+    is a trap worth avoiding rather than working around quietly.
+    """
+    import logging
+
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("userbot.topics")
+    handler = Capture()
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        await topics.respond_in_topic(FakeEvent(top=77), "привет")
+        assert any("topic 77" in r.getMessage() for r in records), [r.getMessage() for r in records]
+        records.clear()
+        await topics.respond_in_topic(FakeEvent(top=None), "привет")
+        assert any("no topic" in r.getMessage() for r in records), [r.getMessage() for r in records]
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+async def test_a_fresh_topic_message_gets_a_plain_reply(topics: Any) -> None:
+    """With no marker, the honest outcome is a reply in the chat's thread.
+
+    Guessing a topic from recency would be worse: an answer in the wrong thread
+    is harder to notice than one in the thread the chat is showing.
+    """
+    event = FakeEvent(top=None)
+    await topics.respond_in_topic(event, "привет")
+    assert event.client.requests == []
+    assert event.respond_calls == [("привет", {})]

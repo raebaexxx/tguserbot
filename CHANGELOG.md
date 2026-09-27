@@ -27,7 +27,7 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 ### Fixed
 
 - **Every `/ub ...` command answered in the main thread, even when written inside
-  a forum topic.** Telegram carries the thread on the message's reply header, and
+  a forum topic.** Telegram carries the topic on the message's reply header, and
   telethon 1.45 reads it and then drops it: both `send_message` and `send_file`
   build `InputReplyToMessage(reply_to)` from a single integer, so `top_msg_id`
   never reaches Telegram. There is no public telethon call that targets a topic,
@@ -36,6 +36,13 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   how the `echo` plugin's "pong" was also landing in the wrong place. Anything
   beyond a plain text message is passed to telethon untouched, rather than partly
   handled and partly dropped.
+
+  Partial by necessity, and the limit is now documented: a message posted fresh
+  inside a topic arrives from Telegram with **no** topic marker, so a command
+  sent that way cannot be attributed to a topic. Commands sent as a reply inside
+  a topic are followed into it. Which thread was chosen is logged on every
+  reply, because the first report of this was twice diagnosed by guesswork
+  before the event's real shape was read off a live forum.
 - **`/ub ai <question>` sent the placeholder and then nothing.** Every delivery
   path went through `placeholder.edit_text()` -- the progress updates, the final
   answer, and even the "the model returned no text" notice -- so when the

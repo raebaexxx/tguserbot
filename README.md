@@ -174,17 +174,38 @@ ignores case and an optional `.git` suffix. Each plugin keeps the three most
 recently fetched revisions, so `/ub plugin update <name> <commit>` is also the
 rollback path.
 
-Replies stay in the forum topic they were asked in. Telegram carries the thread
-on the message's reply header, and telethon 1.45 reads it and then drops it --
-`send_message` and `send_file` both build `InputReplyToMessage(reply_to)` from a
-single integer, so `top_msg_id` never reaches Telegram and every reply would
-land in the main thread. `userbot.topics` builds the request with the topic set,
-and both reply paths are wrapped: commands in the dispatcher, and raw event
-handlers in `PluginContext`. Plugins need do nothing; `event.underlying` reaches
-the real event for code that needs it. Calls using anything beyond plain text --
-`silent`, buttons, `schedule` -- are passed to telethon untouched, because a
-bot that quietly drops an argument is worse than one that answers in the wrong
-thread.
+**Replies follow the topic when Telegram says which one it is.** Telethon 1.45
+reads the topic off the message's reply header and then drops it: `send_message`
+and `send_file` both build `InputReplyToMessage(reply_to)` from a single
+integer, so `top_msg_id` never reaches Telegram. `userbot.topics` builds the
+request with the topic set, on both reply paths -- commands in the dispatcher,
+raw event handlers in `PluginContext`. Plugins need do nothing, and
+`event.underlying` reaches the real event.
+
+There is a limit worth knowing, because it is not the bot's to lift. Measured on
+a live forum:
+
+```
+id=1085586  reply_to=None                            'Как вы?'   <- typed in a topic
+id=1085583  reply_to=MessageReplyHeader top_msg_id=1085403           <- reply in a topic
+```
+
+A message posted **fresh** inside a topic arrives with no topic marker at all.
+Only a message that is itself a reply carries one. So a command sent as a new
+message in a topic cannot be attributed to that topic -- Telegram does not say
+which topic, and guessing from recency would put answers in the wrong thread
+more often than not. **Send the command as a reply to a message inside the
+topic and the answer follows it there.** Which thread was chosen is written to
+the journal on every reply, so this is never a matter of guesswork:
+
+```
+INFO userbot.topics: replying in topic 1085403
+INFO userbot.topics: replying in main thread (no topic on the message)
+```
+
+Calls using anything beyond plain text -- `silent`, buttons, `schedule` -- are
+passed to telethon untouched, because a bot that quietly drops an argument is
+worse than one that answers in the wrong thread.
 
 `/ub plugin adopt <name>` installs a plugin that was generated into the staging
 area (by `/ub ai new`, see below). Generation only ever writes to
