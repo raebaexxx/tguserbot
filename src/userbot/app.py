@@ -22,6 +22,7 @@ from .logging import setup_logging
 from .manager import PluginManager
 from .notify import SystemdNotifier
 from .rate_limit import RateLimiter
+from .safety import format_findings
 from .storage import Storage
 from .watcher import PluginWatcher
 
@@ -283,11 +284,48 @@ class UserbotApp:
                 await self._install_plugin(command, parsed)
             elif action == "update":
                 await self._update_plugin(command, parsed)
+            elif action == "adopt":
+                await self._adopt_plugin(command, parsed.name)
         except PluginLoadError as exc:
             await command.respond(f"Ошибка: {exc}")
         except Exception as exc:
             self.logger.exception("plugin %s failed", action)
             await command.respond(f"Ошибка: {exc}")
+
+    async def _adopt_plugin(self, command: CommandContext, name: str | None) -> None:
+        """Install a staged plugin and load it.
+
+        This is the second, explicit half of plugin generation. Generation only
+        ever writes to the staging directory, so nothing the model produced can
+        run until the owner types this command -- and the safety review runs
+        again here, at the point where it is the difference between running and
+        not running.
+        """
+        if not name:
+            await command.respond("Использование: /ub plugin adopt <name>")
+            return
+        staged = {item["name"]: item for item in self.manager.list_staged()}
+        if name not in staged:
+            available = ", ".join(sorted(staged)) or "ничего"
+            await command.respond(
+                f"В staging нет плагина {name!r}. Доступно: {available}.\n"
+                "Сгенерировать: /ub ai new <имя> <описание>"
+            )
+            return
+        report = staged[name]["report"]
+        try:
+            runtime = await self.manager.install_local(name)
+        except PluginLoadError:
+            raise
+        except Exception as exc:
+            self.logger.exception("adopting %s failed", name)
+            await command.respond(f"Не удалось установить: {exc}")
+            return
+        warnings = format_findings(report.warnings)
+        note = f"\nПредупреждения при проверке:\n{warnings}" if report.warnings else ""
+        await command.respond(
+            f"Плагин {runtime.name} установлен и запущен ({runtime.manifest.version}).{note}"
+        )
 
     async def _enable_plugin(self, command: CommandContext, name: str | None) -> None:
         if not name:
@@ -379,5 +417,6 @@ class UserbotApp:
             "/ub plugin enable <name>\n"
             "/ub plugin disable <name>\n"
             "/ub plugin install <url> <ref> [подпапка]\n"
-            "/ub plugin update <name> [ref]"
+            "/ub plugin update <name> [ref]\n"
+            "/ub plugin adopt <name>   — установить сгенерированный плагин"
         )

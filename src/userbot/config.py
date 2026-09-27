@@ -92,6 +92,30 @@ class Settings:
         return self.data_dir / "plugin-data"
 
     @property
+    def installed_plugin_dir(self) -> Path:
+        """Root for plugins the operator installed at runtime.
+
+        Deliberately *not* ``plugin_dir``. The shipped tree is root-owned and
+        made read-only by ``ProtectSystem=strict``, so writing an adopted plugin
+        there fails in production while succeeding in development. Keeping
+        runtime-installed plugins under the writable data directory means the
+        same code path works in both, and the shipped code stays untamperable.
+        """
+        override = os.environ.get("TGUSERBOT_INSTALLED_PLUGIN_DIR")
+        if override:
+            return Path(override).expanduser()
+        return self.data_dir / "local-plugins"
+
+    @property
+    def staging_dir(self) -> Path:
+        """Where generated plugins wait for review before being adopted.
+
+        Not a plugin root: a subdirectory here has no ``plugin.toml`` of its
+        own, so neither discovery nor the watcher ever sees it.
+        """
+        return self.data_dir / "plugin-staging"
+
+    @property
     def plugin_config_path(self) -> Path:
         """Operator overrides for per-plugin settings."""
         return self.data_dir / "plugin-config.toml"

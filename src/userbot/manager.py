@@ -9,10 +9,11 @@ from typing import Any
 from .config import Settings
 from .git_source import GitPluginSource, GitSourceError
 from .health import HealthService
-from .loader import PluginLoadError, cleanup_loaded_plugin, load_plugin
+from .loader import PluginLoadError, PluginManifest, cleanup_loaded_plugin, load_plugin
 from .logging import get_logger
 from .plugin_api import PluginContext, validate_plugin_interface
 from .plugin_config import PluginConfigError, PluginConfigStore
+from .safety import format_findings, read_tree_sources, review_tree
 from .storage import PluginStorage, Storage, create_plugin_storage
 from .task_registry import run_uninterruptible
 
@@ -102,15 +103,43 @@ class PluginManager:
         return self._scan_local_names()
 
     def _scan_local_names(self) -> list[str]:
-        plugin_dir = self.settings.plugin_dir
-        if not plugin_dir.is_dir():
-            return []
-        try:
-            entries = sorted(plugin_dir.iterdir())
-        except OSError:
-            self.logger.warning("cannot read the plugin directory %s", plugin_dir)
-            return []
-        return [path.name for path in entries if path.is_dir() and (path / "plugin.toml").is_file()]
+        names: list[str] = []
+        for root in self.plugin_roots():
+            if not root.is_dir():
+                continue
+            try:
+                entries = sorted(root.iterdir())
+            except OSError:
+                self.logger.warning("cannot read the plugin directory %s", root)
+                continue
+            names.extend(
+                path.name for path in entries if path.is_dir() and (path / "plugin.toml").is_file()
+            )
+        # A name can only live in one root; installed wins so an adopted plugin
+        # is not shadowed by a shipped one of the same name.
+        return sorted(set(names))
+
+    def plugin_roots(self) -> tuple[Path, ...]:
+        """Directories holding loadable local plugins, most specific first.
+
+        ``plugin_dir`` is the shipped tree. ``installed_plugin_dir`` is where
+        ``/ub plugin adopt`` writes, and it lives under the writable data
+        directory because the shipped tree is read-only under
+        ``ProtectSystem=strict``.
+        """
+        roots: list[Path] = [self.settings.plugin_dir]
+        installed = self.settings.installed_plugin_dir
+        if installed not in roots:
+            roots.append(installed)
+        return tuple(roots)
+
+    def local_path(self, name: str) -> Path | None:
+        """Where a local plugin with this name lives, or ``None`` if it is not local."""
+        for root in self.plugin_roots():
+            candidate = root / name
+            if (candidate / "plugin.toml").is_file():
+                return candidate
+        return None
 
     def _known_names(self) -> set[str]:
         return set(self._scan_local_names()) | set(self._runtimes)
@@ -217,10 +246,13 @@ class PluginManager:
         if name in self._disabled:
             await self._mark_disabled(name)
             return None
+        path = self.local_path(name)
+        if path is None:
+            raise PluginLoadError(f"Плагин {name!r} не найден ни в одном из каталогов плагинов")
         async with self._operation(name):
             return await self._load_path(
                 name=name,
-                path=self.settings.plugin_dir / name,
+                path=path,
                 source="local",
                 source_ref=None,
                 source_url=None,
@@ -230,10 +262,11 @@ class PluginManager:
     async def reload_local(self, name: str) -> PluginRuntime | None:
         if name in self._disabled:
             return None
+        path = self.local_path(name) or self.settings.plugin_dir / name
         async with self._operation(name):
             return await self._load_path(
                 name=name,
-                path=self.settings.plugin_dir / name,
+                path=path,
                 source="local",
                 source_ref=None,
                 source_url=None,
@@ -683,6 +716,105 @@ class PluginManager:
         import shutil
 
         shutil.rmtree(path, ignore_errors=True)
+
+    # -- adoption -----------------------------------------------------------
+
+    def staged_path(self, name: str) -> Path:
+        """Where a plugin awaiting review lives. Not a plugin root."""
+        return self.settings.staging_dir / name
+
+    def list_staged(self) -> list[dict[str, Any]]:
+        """Plugins waiting to be adopted, with their safety verdict attached.
+
+        The review runs here so ``/ub plugin adopt`` can refuse, and so the owner
+        sees what they are agreeing to *before* typing the command that runs it.
+        """
+        staging = self.settings.staging_dir
+        if not staging.is_dir():
+            return []
+        result: list[dict[str, Any]] = []
+        try:
+            entries = sorted(staging.iterdir())
+        except OSError:
+            self.logger.warning("cannot read the staging directory %s", staging)
+            return []
+        for path in entries:
+            if not path.is_dir() or not (path / "plugin.toml").is_file():
+                continue
+            sources = read_tree_sources(path)
+            report = review_tree(sources)
+            result.append(
+                {
+                    "name": path.name,
+                    "path": path,
+                    "files": sorted(sources),
+                    "report": report,
+                    "manifest": PluginManifest.from_path(path),
+                }
+            )
+        return result
+
+    async def install_local(self, name: str, *, allow_blocking: bool = False) -> PluginRuntime:
+        """Adopt a staged plugin: review it, install it, then load it.
+
+        The review is a hard gate. It is a denylist, not a sandbox, so the
+        contract is narrow and honest: adoption refuses code that reaches for a
+        shell, a socket, or the session file, and the owner is shown exactly what
+        was flagged for everything else. A caller that needs to override must say
+        so out loud, which is why the parameter exists and is not defaulted.
+        """
+        source = self.staged_path(name)
+        if not (source / "plugin.toml").is_file():
+            raise PluginLoadError(
+                f"В {source} нет plugin.toml; сначала сгенерируйте плагин (/ub ai new)"
+            )
+        manifest = PluginManifest.from_path(source)
+        if manifest.name != name:
+            raise PluginLoadError(
+                f"Имя в plugin.toml ({manifest.name!r}) не совпадает с каталогом ({name!r})"
+            )
+        report = review_tree(read_tree_sources(source))
+        if not report.ok and not allow_blocking:
+            detail = format_findings(report.blocking)
+            raise PluginLoadError(
+                f"Плагин {name!r} не прошёл проверку безопасности:\n{detail}\n"
+                "Уберите эти строки вручную в staging и повторите, если они нужны."
+            )
+
+        target = self.settings.installed_plugin_dir / name
+        old = self._runtimes.get(name)
+        if old is not None:
+            await self.unload(name)
+        if target.exists():
+            await asyncio.to_thread(self._remove_tree, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self._copy_tree, source, target)
+        # The staged copy stays: it is the record of what was reviewed, and the
+        # owner may want to diff it against what is running.
+        try:
+            async with self._operation(name):
+                runtime = await self._load_path(
+                    name=name,
+                    path=target,
+                    source="local",
+                    source_ref=None,
+                    source_url=None,
+                    force=True,
+                )
+            if runtime is None:
+                await asyncio.to_thread(self._remove_tree, target)
+                raise PluginLoadError(f"Плагин {name!r} выключен; включите его и повторите")
+            return runtime
+        except Exception:
+            # Leave nothing half-installed behind.
+            await asyncio.to_thread(self._remove_tree, target)
+            raise
+
+    @staticmethod
+    def _copy_tree(source: Path, target: Path) -> None:
+        import shutil
+
+        shutil.copytree(source, target, symlinks=False, dirs_exist_ok=False)
 
     # -- shutdown -----------------------------------------------------------
 

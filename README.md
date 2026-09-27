@@ -152,6 +152,7 @@ owner IDs. The logged-in account is always added to the owner set.
 /ub plugin enable <name>
 /ub plugin install <url> <ref> [subpath]
 /ub plugin update <name> [ref]
+/ub plugin adopt <name>
 ```
 
 `/ub version` reports the running build and the storage schema version, which is
@@ -170,6 +171,15 @@ Fetching a Git plugin is a no-op unless the URL is allow-listed; comparison
 ignores case and an optional `.git` suffix. Each plugin keeps the three most
 recently fetched revisions, so `/ub plugin update <name> <commit>` is also the
 rollback path.
+
+`/ub plugin adopt <name>` installs a plugin that was generated into the staging
+area (by `/ub ai new`, see below). Generation only ever writes to
+`<data_dir>/plugin-staging/`, which is not a plugin root, so nothing it produced
+can run until you type this command. Adoption runs a static review of the code
+first and refuses anything that reaches for a shell, a socket, a native library,
+or the session file; anything else it flags is shown alongside the result. The
+review is a denylist, not a sandbox — treat adopted code as trusted, because you
+just approved it.
 
 **Note on the systemd deployment:** the shipped unit sets `ProtectSystem=strict`,
 which makes `/opt/tguserbot/plugins` read-only, so the watcher cannot fire there.

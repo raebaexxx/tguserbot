@@ -53,7 +53,7 @@ def _clip(text: str) -> str:
 
 
 #: Sub-commands accepted by ``/ub plugin``.
-PLUGIN_ACTIONS = ("list", "reload", "enable", "disable", "install", "update")
+PLUGIN_ACTIONS = ("list", "reload", "enable", "disable", "install", "update", "adopt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +84,10 @@ def parse_plugin_action(text: str) -> PluginAction | None:
     rest = parts[1:]
     if action == "list":
         return PluginAction(action="list")
+    if action == "adopt":
+        if not rest:
+            return None
+        return PluginAction(action="adopt", name=rest[0])
     if action in {"reload", "enable", "disable"}:
         if not rest:
             return None
