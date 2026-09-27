@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "A modular Telegram userbot with a safe, reloadable plugin system"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
 authors = [{ name = "raebaexxx" }]
 dependencies = [
     "telethon==1.45.0",
@@ -19,18 +20,50 @@ dependencies = [
 dev = [
     "mypy>=1.14,<2",
     "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<1",
+    "pytest-cov>=6,<7",
+    "pytest-timeout>=2.3,<3",
     "ruff>=0.9,<1",
+    "types-yt-dlp",
 ]
 
 [project.scripts]
 tguserbot = "userbot.__main__:main"
 
+[project.urls]
+Homepage = "https://github.com/raebaexxx/tguserbot"
+Source = "https://github.com/raebaexxx/tguserbot"
+Issues = "https://github.com/raebaexxx/tguserbot/issues"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+userbot = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --timeout=60 --strict-markers"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "git: tests that need the git executable",
+]
+
+[tool.coverage.run]
+source = ["src/userbot"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 85
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.$",
+]
 
 [tool.ruff]
 target-version = "py312"

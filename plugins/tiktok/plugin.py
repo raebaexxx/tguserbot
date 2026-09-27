@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
 import re
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from telethon import events
@@ -18,6 +17,7 @@ from userbot.commands import CommandContext
 from userbot.plugin_api import Plugin as BasePlugin
 from userbot.plugin_api import PluginContext
 
+#: Refuse anything larger; checked during the download, not only afterwards.
 MAX_FILE_SIZE = 50 * 1024 * 1024
 ALLOWED_DOMAINS = ("tiktok.com", "tiktokv.com")
 URL_PATTERN = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
@@ -26,6 +26,29 @@ DIRECT_COMMAND_PATTERN = re.compile(
     re.IGNORECASE,
 )
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
+
+#: Longest URL we will hand to yt-dlp.
+MAX_URL_LENGTH = 2048
+
+#: Minimum seconds between progress edits of the command message. Telegram
+#: throttles repeated edits aggressively, and the account is what gets limited.
+PROGRESS_MIN_INTERVAL = 3.0
+
+#: How often the reporter wakes up to consider an edit.
+PROGRESS_TICK = 0.5
+
+#: yt-dlp retries/timeout budget for one download.
+SOCKET_TIMEOUT = 20
+RETRIES = 3
+
+#: TikTok rejects requests that do not look like a browser. ``curl-cffi`` is a
+#: hard dependency for exactly this; without ``impersonate`` the extractor is
+#: routinely served a challenge page instead of the video.
+IMPERSONATE_TARGET = "chrome"
+
+USER_AGENT = (
+    "Mozilla/5.0 (compatible; tguserbot/0.1; +https://github.com/raebaexxx/tguserbot)"
+)
 
 
 class TikTokDownloadError(RuntimeError):
@@ -60,6 +83,8 @@ class _ProgressState:
 
 
 class _YDLLogger:
+    """Route yt-dlp chatter into the plugin logger instead of stdout."""
+
     def __init__(self, logger: Any):
         self.logger = logger
 
@@ -122,7 +147,7 @@ def extract_tiktok_url(text: str) -> str:
     if len(matches) != 1:
         raise TikTokDownloadError("Нужна ровно одна ссылка TikTok.")
     url = matches[0].rstrip(".,!?)]}")
-    if len(url) > 2048:
+    if len(url) > MAX_URL_LENGTH:
         raise TikTokDownloadError("Ссылка слишком длинная.")
     try:
         parsed = urlsplit(url)
@@ -176,37 +201,46 @@ class Plugin(BasePlugin):
         if not self.ctx.is_owner(getattr(event, "sender_id", None)):
             return
 
+        try:
+            url = extract_tiktok_url(text)
+        except TikTokDownloadError as exc:
+            await self._show_error(event, str(exc))
+            return
+
+        await self._set_status(event, "⏳ Скачивание TikTok: 0%")
         temporary_dir: Path | None = None
-        progress_state = _ProgressState()
-        progress_stop = asyncio.Event()
-        progress_task: asyncio.Task[None] | None = None
+        reporter: asyncio.Task[None] | None = None
         sent = False
         try:
-            await self._set_status(event, "⏳ Скачивание TikTok: 0%")
-            progress_task = asyncio.create_task(
-                self._report_progress(event, progress_state, progress_stop),
-                name="tiktok-progress",
-            )
-            try:
-                url = extract_tiktok_url(text)
-            except TikTokDownloadError as exc:
-                await self._show_error(event, str(exc))
-                return
-
             temporary_dir = Path(
-                await asyncio.to_thread(
-                    tempfile.mkdtemp,
-                    prefix="tguserbot-tiktok-",
-                )
+                await asyncio.to_thread(tempfile.mkdtemp, prefix="tguserbot-tiktok-")
             )
             loop = asyncio.get_running_loop()
+            state = _ProgressState()
+            progress = asyncio.Event()
+            reporter = asyncio.create_task(
+                self._report_progress(event, state, progress),
+                name="tiktok-progress",
+            )
             async with self.download_lock:
-                video_path = await asyncio.to_thread(
-                    self._download_sync,
-                    url,
-                    temporary_dir,
-                    self._make_progress_hook(progress_state, loop),
-                )
+                try:
+                    video_path = await asyncio.to_thread(
+                        self._download_sync,
+                        url,
+                        temporary_dir,
+                        self._make_progress_hook(state, loop, progress),
+                    )
+                except TikTokFileTooLarge:
+                    raise
+                except Exception as exc:
+                    raise TikTokDownloadError(str(exc)) from exc
+            # Stop the reporter *before* uploading: leaving it running made it
+            # overwrite the final status and edit the message ~2x/second for the
+            # whole upload, which is exactly how Telegram edit throttling starts.
+            progress.set()
+            await self._await_reporter(reporter)
+            reporter = None
+
             if video_path.stat().st_size > MAX_FILE_SIZE:
                 raise TikTokFileTooLarge
 
@@ -215,29 +249,49 @@ class Plugin(BasePlugin):
                 await event.respond(file=str(video_path))
             sent = True
         except TikTokFileTooLarge:
-            await self._show_error(event, "Видео слишком большое для этого плагина (лимит 50 МБ).")
+            await self._show_error(
+                event, "Видео слишком большое для этого плагина (лимит 50 МБ)."
+            )
+        except TikTokDownloadError as exc:
+            if self.ctx is not None:
+                self.ctx.logger.warning("TikTok download failed: %s", type(exc).__name__)
+            await self._show_error(
+                event,
+                "❌ Не удалось скачать TikTok. Проверьте ссылку или попробуйте позже.",
+            )
         except Exception as exc:
-            self.ctx.logger.warning("TikTok download failed: %s", type(exc).__name__)
+            if self.ctx is not None:
+                self.ctx.logger.warning("TikTok download failed: %r", exc)
             await self._show_error(
                 event,
                 "❌ Не удалось скачать TikTok. Проверьте ссылку или попробуйте позже.",
             )
         finally:
-            progress_stop.set()
-            if progress_task is not None:
-                progress_task.cancel()
-                await asyncio.gather(progress_task, return_exceptions=True)
+            if reporter is not None:
+                reporter.cancel()
+                await asyncio.gather(reporter, return_exceptions=True)
             if temporary_dir is not None:
                 await asyncio.to_thread(_remove_tree, temporary_dir)
             if sent:
                 await self._delete_command(event)
 
+    async def _await_reporter(self, reporter: asyncio.Task[None]) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(reporter), timeout=PROGRESS_TICK * 4)
+        except (TimeoutError, asyncio.CancelledError):
+            reporter.cancel()
+        finally:
+            await asyncio.gather(reporter, return_exceptions=True)
+
     def _make_progress_hook(
         self,
         state: _ProgressState,
         loop: asyncio.AbstractEventLoop,
+        stop: asyncio.Event,
     ) -> Any:
         def progress_hook(data: dict[str, Any]) -> None:
+            if stop.is_set():
+                return
             try:
                 status = data.get("status")
                 if status == "downloading":
@@ -249,16 +303,21 @@ class Plugin(BasePlugin):
                     speed = float(speed_value) if speed_value else None
                     eta_value = data.get("eta")
                     eta = str(eta_value) if eta_value not in (None, "NA") else None
+                    # Abort while the file is still growing: a post-download size
+                    # check only runs after the disk is already full.
+                    if downloaded > MAX_FILE_SIZE:
+                        stop.set()
+                        raise TikTokFileTooLarge
                     values = (percent, downloaded, total, speed, eta)
                 elif status == "finished":
                     values = (100, state.downloaded_bytes, state.total_bytes, None, None)
                 else:
                     return
-                try:
-                    loop.call_soon_threadsafe(state.update, *values)
-                except RuntimeError:
-                    return
             except (TypeError, ValueError):
+                return
+            try:
+                loop.call_soon_threadsafe(state.update, *values)
+            except RuntimeError:
                 return
 
         return progress_hook
@@ -269,36 +328,42 @@ class Plugin(BasePlugin):
         temporary_dir: Path,
         progress_hook: Any,
     ) -> Path:
-        os.environ.setdefault("YTDLP_NO_PLUGINS", "1")
+        # Imported here so a broken yt-dlp install cannot stop the whole userbot
+        # from booting. Note that yt-dlp's own plugin scanner is never invoked
+        # on the library path (load_all_plugins() is CLI-only), so no
+        # YTDLP_NO_PLUGINS / plugin_dirs juggling is needed or wanted -- setting
+        # process-wide env from a worker thread was a side effect on every other
+        # plugin.
         from yt_dlp import YoutubeDL
 
-        options = {
+        options: dict[str, Any] = {
             "outtmpl": str(temporary_dir / "video.%(ext)s"),
             "format": "best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "noplaylist": True,
+            "max_downloads": 1,
             "max_filesize": MAX_FILE_SIZE,
-            "retries": 3,
-            "fragment_retries": 3,
-            "socket_timeout": 20,
+            "retries": RETRIES,
+            "fragment_retries": RETRIES,
+            "socket_timeout": SOCKET_TIMEOUT,
             "quiet": True,
             "noprogress": True,
             "no_warnings": True,
             "nocheckcertificate": False,
             "cachedir": False,
-            "plugin_dirs": [],
             "restrictfilenames": True,
             "continuedl": False,
             "overwrites": True,
             "progress_hooks": [progress_hook],
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (compatible; tguserbot/0.1; +https://github.com/raebaexxx/tguserbot)",
-            },
+            "impersonate": IMPERSONATE_TARGET,
+            "http_headers": {"User-Agent": USER_AGENT},
             "logger": _YDLLogger(
                 self.ctx.logger if self.ctx else logging.getLogger("userbot.plugin.tiktok")
             ),
         }
-        with YoutubeDL(options) as downloader:
+        # yt-dlp types its options as a private TypedDict, so a plain dict of
+        # runtime values cannot be passed without a cast.
+        with YoutubeDL(cast(Any, options)) as downloader:
             info = downloader.extract_info(url, download=True)
         if not isinstance(info, dict):
             raise TikTokDownloadError("TikTok did not return video metadata.")
@@ -321,21 +386,32 @@ class Plugin(BasePlugin):
         state: _ProgressState,
         stop_event: asyncio.Event,
     ) -> None:
-        last_edit = 0.0
-        last_percent = -1
+        """Edit the command message, but never faster than PROGRESS_MIN_INTERVAL.
+
+        The throttle used to be skipped once the percentage hit 100, so a
+        finished download spammed ~2 edits/second for as long as the upload took.
+        """
         loop = asyncio.get_running_loop()
+        last_edit = 0.0
+        last_text = ""
         while not stop_event.is_set():
-            await asyncio.sleep(0.5)
-            if stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=PROGRESS_TICK)
                 return
+            except TimeoutError:
+                pass
             now = loop.time()
-            if state.percent == last_percent and state.percent < 100:
+            if now - last_edit < PROGRESS_MIN_INTERVAL:
                 continue
-            if state.percent < 100 and now - last_edit < 2.0:
+            text = _format_progress(state)
+            if text == last_text:
                 continue
-            await self._set_status(event, _format_progress(state))
+            if not await self._set_status(event, text):
+                # Editing is failing (deleted message, flood wait); stop trying
+                # rather than hammering the API for the rest of the download.
+                return
             last_edit = now
-            last_percent = state.percent
+            last_text = text
 
     async def _set_status(self, event: Any, text: str) -> bool:
         if self.progress_lock is None:

@@ -1,3 +1,6 @@
+# Local analysis/rewrite plans (kept in the working tree only)
+PLAN.local.md
+
 # Secrets and local configuration
 .env
 .env.*

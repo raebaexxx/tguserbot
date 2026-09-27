@@ -25,4 +25,6 @@ class Plugin(BasePlugin):
         ]
         if snapshot.get("last_error"):
             lines.append(f"Последняя ошибка: {snapshot['last_error']}")
+        for entry in snapshot.get("plugin_error_details", []):
+            lines.append(f"Ошибка {entry['plugin']} ({entry['age_seconds']}s): {entry['message']}")
         await command.respond("\n".join(lines))
