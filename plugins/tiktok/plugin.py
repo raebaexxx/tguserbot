@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import re
 import shutil
@@ -14,6 +13,7 @@ from urllib.parse import urlsplit
 from telethon import events
 
 from userbot.commands import CommandContext
+from userbot.messaging import delete_message, edit_message
 from userbot.plugin_api import Plugin as BasePlugin
 from userbot.plugin_api import PluginContext
 
@@ -487,20 +487,7 @@ class Plugin(BasePlugin):
         if self.progress_lock is None:
             return False
         async with self.progress_lock:
-            edit = getattr(event, "edit_text", None)
-            if not callable(edit):
-                edit = getattr(event, "edit", None)
-            if not callable(edit):
-                return False
-            try:
-                result = edit(text)
-                if inspect.isawaitable(result):
-                    await result
-                return True
-            except Exception as exc:
-                if self.ctx is not None:
-                    self.ctx.logger.debug("TikTok status edit failed: %s", type(exc).__name__)
-                return False
+            return await edit_message(event, text)
 
     async def _show_error(self, event: Any, text: str) -> None:
         if not await self._set_status(event, f"❌ {text}"):
@@ -514,13 +501,5 @@ class Plugin(BasePlugin):
                 self.ctx.logger.warning("TikTok response failed: %s", type(exc).__name__)
 
     async def _delete_command(self, event: Any) -> None:
-        delete = getattr(event, "delete", None)
-        if not callable(delete):
-            return
-        try:
-            result = delete()
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            if self.ctx is not None:
-                self.ctx.logger.warning("Could not delete TikTok command: %s", type(exc).__name__)
+        """A command that stays behind is untidy, not broken."""
+        await delete_message(event)

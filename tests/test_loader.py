@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -215,16 +216,25 @@ async def test_task_group_rejects_spawn_after_close() -> None:
 
 
 async def test_task_group_reports_timeout_for_stubborn_task() -> None:
+    release = asyncio.Event()
+
     async def stubborn() -> None:
-        while True:
+        while not release.is_set():
             try:
-                await asyncio.sleep(60)
+                await asyncio.sleep(0.01)
             except asyncio.CancelledError:
                 pass  # deliberately swallows cancellation
 
     group = TaskGroup()
     leaked = group.spawn(stubborn())
     await asyncio.sleep(0)  # let the task reach its first await
-    assert await group.cancel_all(timeout_seconds=0.05) is False
-    leaked.cancel()
-    await asyncio.sleep(0)
+    try:
+        assert await group.cancel_all(timeout_seconds=0.05) is False
+    finally:
+        # It has to be released, not abandoned. A task that swallows every
+        # cancellation outlives the test, and pytest-asyncio 1.x drains the loop
+        # at teardown, so the leak turns into a hang rather than a slow exit.
+        release.set()
+        leaked.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await leaked

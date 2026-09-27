@@ -26,6 +26,17 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
 ### Fixed
 
+- **Streaming progress never appeared in production.** The ai plugin edited its
+  placeholder with `event.edit_text`, and telethon's `Message` has no such
+  method -- it is called `edit`. Every progress update raised `AttributeError`,
+  the editor marked itself broken on the first token, and the final answer still
+  arrived because that goes out as a new message, so nothing looked wrong from
+  the outside. `userbot.messaging.edit_message` now knows both spellings and
+  returns whether the edit worked, and both plugins use it.
+- **`SupportsRespond` promised a method that does not exist.** The protocol
+  declared `edit_text`, so a plugin could type-check against a fiction and fail
+  at runtime. Trimmed to what the object actually has, with a pointer to the
+  helper.
 - **Every `/ub ...` command answered in the main thread, even when written inside
   a forum topic.** Telegram carries the topic on the message's reply header, and
   telethon 1.45 reads it and then drops it: both `send_message` and `send_file`
@@ -192,6 +203,9 @@ Also fixed:
 
 ### Added
 
+- `userbot.messaging`: `edit_message` and `delete_message`, which work whether
+  the object underneath is a telethon or a pyrogram message, and report failure
+  instead of raising.
 - Failure alerting: `OnFailure=` runs `deploy/alert.sh` once systemd gives up
   restarting, sending the journal excerpt to `TGUSERBOT_ALERT_CHAT`. Without a
   chat ID the hook exits quietly.
@@ -219,6 +233,13 @@ Also fixed:
 
 ### Changed
 
+- Development tooling moved up a major version: mypy 2.3, pytest 9.1,
+  pytest-asyncio 1.4, pytest-cov 7.1. The pins were written when the project
+  started and had not been moved, so four tools were a major behind. pytest-asyncio
+  1.x drains the event loop at teardown, which surfaced two tests that leaked a
+  background task swallowing cancellation forever; they now release the task
+  instead of abandoning it. `pytest-timeout` stays on `<2.5` because 2.5.0 was
+  yanked upstream for an accidental breaking change.
 - `requirements.lock` now carries hashes, which means it no longer contains the
   editable `-e .` line (a local directory cannot be hashed). The install scripts
   do the two steps separately: `--require-hashes` for dependencies, then

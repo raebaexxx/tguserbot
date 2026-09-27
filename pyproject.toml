@@ -19,10 +19,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "mypy>=1.14,<2",
-    "pytest>=8.3,<9",
-    "pytest-asyncio>=0.25,<1",
-    "pytest-cov>=6,<7",
+    "mypy>=2.3,<3",
+    "pytest>=9.1,<10",
+    "pytest-asyncio>=1.4,<2",
+    "pytest-cov>=7.1,<8",
     "pytest-timeout>=2.3,<3",
     "ruff>=0.9,<1",
     "types-yt-dlp",

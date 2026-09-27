@@ -18,11 +18,17 @@ from typing import Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class SupportsRespond(Protocol):
-    """The event object a command callback or handler receives."""
+    """The event object a command callback or handler receives.
+
+    Deliberately minimal. It once declared ``edit_text``, which telethon's
+    ``Message`` does not have -- the method is called ``edit`` there and
+    ``edit_text`` in pyrogram -- so a plugin type-checked against this and then
+    failed at runtime, which is the worst of both. Use
+    :func:`userbot.messaging.edit_message`, which knows the name, instead of
+    calling either directly.
+    """
 
     async def respond(self, text: str | None = None, **kwargs: Any) -> Any: ...
-
-    async def edit_text(self, text: str, **kwargs: Any) -> Any: ...
 
 
 @runtime_checkable

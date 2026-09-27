@@ -20,6 +20,7 @@ import json
 import logging
 from typing import Any
 
+from userbot.messaging import delete_message, edit_message
 from userbot.plugin_api import Plugin as BasePlugin
 from userbot.plugin_api import PluginContext
 from userbot.safety import format_findings, read_tree_sources, review_tree
@@ -175,24 +176,15 @@ class ProgressEditor:
         if text is None or self._broken:
             return
         self._edits += 1
-        try:
-            await self._event.edit_text(text)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # The placeholder may not be editable at all -- respond() hands back
-            # whatever the transport returned. That used to be swallowed at
-            # DEBUG, which meant a total delivery failure left no trace in the
-            # journal. It is WARNING now, and reported once: a warning per token
-            # would be its own flood. The answer is delivered separately, so
-            # losing progress rendering is not fatal.
+        if not await edit_message(self._event, text):
+            # Telethon's Message has `edit` and no `edit_text`, so calling
+            # edit_text directly raised AttributeError on every progress update
+            # and streaming did nothing in production. edit_message knows the
+            # name; this only has to notice that it failed.
             self._broken = True
             self._stop.set()
             LOGGER.warning(
-                "ai: cannot edit the progress message (%s: %s); "
-                "answers will be sent as new messages",
-                type(exc).__name__,
-                exc,
+                "ai: cannot edit the progress message; answers will be sent as new messages"
             )
 
     async def finish(self) -> None:
@@ -407,15 +399,7 @@ class Plugin(BasePlugin):
     @staticmethod
     async def _discard(placeholder: Any) -> None:
         """Remove the placeholder once the real answer is out."""
-        if placeholder is None:
-            return
-        try:
-            await placeholder.delete()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # Leaving a stray "…" behind is untidy, not broken.
-            LOGGER.debug("could not remove the placeholder: %s", exc)
+        await delete_message(placeholder)
 
     # -- generation --------------------------------------------------------
 

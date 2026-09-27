@@ -174,6 +174,14 @@ ignores case and an optional `.git` suffix. Each plugin keeps the three most
 recently fetched revisions, so `/ub plugin update <name> <commit>` is also the
 rollback path.
 
+**Editing a message: use `userbot.messaging.edit_message`, not `event.edit_text`.**
+Telethon's `Message` has `edit` and no `edit_text`; Pyrogram's has `edit_text`
+and no `edit`. Both are the obvious name to reach for, and the wrong one fails
+quietly rather than loudly — a plugin that calls `edit_text` on a Telethon message
+raises `AttributeError` on every call, so a streaming progress display simply
+never appears while everything else still works. `edit_message` tries both, and
+`delete_message` does the same for deletion.
+
 **Replies follow the topic when Telegram says which one it is.** Telethon 1.45
 reads the topic off the message's reply header and then drops it: `send_message`
 and `send_file` both build `InputReplyToMessage(reply_to)` from a single

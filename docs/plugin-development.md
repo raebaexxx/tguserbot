@@ -96,6 +96,16 @@ session. It receives the already configured client through `ctx.client`.
 | `ctx.register_handler(...)` | Raw Telethon event handler |
 | `ctx.is_owner(sender_id)` | Owner check |
 
+Two names are traps, and they are the two a plugin reaches for first.
+
+**Editing a message.** Use `from userbot.messaging import edit_message` rather
+than calling `event.edit_text` or `event.edit`. Telethon's `Message` has `edit`
+and no `edit_text`; Pyrogram's has `edit_text` and no `edit`. Both spellings look
+obviously right, and the wrong one fails quietly: the `AttributeError` happens
+inside whatever was streaming, so a progress display just never appears while
+the command still works. `edit_message` tries both and returns whether it
+worked, and `delete_message` does the same for `event.delete()`.
+
 `ctx.client`, `ctx.dispatcher`, and `ctx.manager` are declared as `Protocol`s in
 `userbot.protocols`, not as `Any`, so a type checker verifies plugin code against
 the surface the core actually provides. `validate_plugin_interface` also rejects

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -495,19 +496,28 @@ async def test_run_uninterruptible_swallows_cleanup_errors() -> None:
 
 
 async def test_task_group_reports_surviving_tasks() -> None:
+    release = asyncio.Event()
+
     async def stubborn() -> None:
-        while True:
+        while not release.is_set():
             try:
-                await asyncio.sleep(60)
+                await asyncio.sleep(0.01)
             except asyncio.CancelledError:
-                pass
+                pass  # ignoring cancellation is the behaviour under test
 
     group = TaskGroup(name="g")
     task = group.spawn(stubborn(), name="stubborn")
     await asyncio.sleep(0)
-    assert await group.cancel_all(timeout_seconds=0.05) is False
-    assert task in group.pending
-    task.cancel()
+    try:
+        assert await group.cancel_all(timeout_seconds=0.05) is False
+        assert task in group.pending
+    finally:
+        # Released rather than abandoned: pytest-asyncio 1.x drains the loop at
+        # teardown, so a task that never stops becomes a hang.
+        release.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 async def test_task_group_logs_task_failures(caplog: pytest.LogCaptureFixture) -> None:
