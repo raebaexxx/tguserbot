@@ -286,14 +286,18 @@ class Plugin(BasePlugin):
             await self._show_error(event, "Видео слишком большое для этого плагина (лимит 50 МБ).")
         except TikTokDownloadError as exc:
             if self.ctx is not None:
-                self.ctx.logger.warning("TikTok download failed: %s", type(exc).__name__)
+                # The message, not just the class name. "TikTok download failed:
+                # TikTokDownloadError" says that a download failed and nothing
+                # about why, which made the live failure undiagnosable from the
+                # server -- the same mistake the ai plugin had just been fixed for.
+                self.ctx.logger.warning("TikTok download failed: %s", exc)
             await self._show_error(
                 event,
                 "❌ Не удалось скачать TikTok. Проверьте ссылку или попробуйте позже.",
             )
-        except Exception as exc:
+        except Exception:
             if self.ctx is not None:
-                self.ctx.logger.warning("TikTok download failed: %r", exc)
+                self.ctx.logger.exception("TikTok download failed")
             await self._show_error(
                 event,
                 "❌ Не удалось скачать TikTok. Проверьте ссылку или попробуйте позже.",
@@ -376,7 +380,11 @@ class Plugin(BasePlugin):
             "format": "best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "noplaylist": True,
-            "max_downloads": 1,
+            # No "max_downloads": 1. It looked like a safety limit, but yt-dlp
+            # raises MaxDownloadsReached once the count is hit -- and TikTok
+            # resolves through the playlist machinery, so that happened after a
+            # *single* video and the plugin reported a failure with the file
+            # already on disk. nplaylist is what actually prevents a playlist.
             "max_filesize": self.max_file_size,
             "retries": RETRIES,
             "fragment_retries": RETRIES,
@@ -411,17 +419,26 @@ class Plugin(BasePlugin):
         progress_hook: Any,
     ) -> Path:
         from yt_dlp import YoutubeDL
+        from yt_dlp.utils import MaxDownloadsReached
 
         self._temporary_dir = temporary_dir
         options = self.build_options(progress_hook)
         # yt-dlp types its options as a private TypedDict, so a plain dict of
         # runtime values cannot be passed without a cast.
         with YoutubeDL(cast(Any, options)) as downloader:
-            info = downloader.extract_info(url, download=True)
-        if not isinstance(info, dict):
+            try:
+                info = downloader.extract_info(url, download=True)
+            except MaxDownloadsReached:
+                # yt-dlp's way of saying "I have what you asked for, stop". It
+                # is control flow, not a failure: the file it wanted is already
+                # written. The scan below decides whether that is true, so a
+                # genuine failure with no file still reports as one.
+                info = None
+        if isinstance(info, dict):
+            if info.get("_type") in {"playlist", "multi_video"} or info.get("entries"):
+                raise TikTokDownloadError("Playlist links are not supported.")
+        elif info is not None:
             raise TikTokDownloadError("TikTok did not return video metadata.")
-        if info.get("_type") in {"playlist", "multi_video"} or info.get("entries"):
-            raise TikTokDownloadError("Playlist links are not supported.")
         candidates = [
             path
             for path in temporary_dir.iterdir()

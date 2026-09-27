@@ -130,7 +130,9 @@ def test_options_suppress_output_and_caches(tiktok: tuple[Any, Any]) -> None:
     assert options["no_warnings"] is True
     assert options["cachedir"] is False
     assert options["noplaylist"] is True
-    assert options["max_downloads"] == 1
+    # Not max_downloads: it made yt-dlp raise on a single video. See
+    # tests/test_tiktok_retry.py for the live failure it caused.
+    assert "max_downloads" not in options
 
 
 def test_progress_hook_is_registered(tiktok: tuple[Any, Any]) -> None:

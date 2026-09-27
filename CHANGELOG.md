@@ -36,6 +36,17 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   placeholder is deleted afterwards; a failed edit is reported once at WARNING
   instead of being absorbed. Progress rendering is still attempted and still
   throttled, and stops retrying as soon as it is known to be broken.
+- **`/ub tt <link>` reported "Не удалось скачать TikTok" with the video already
+  downloaded.** `max_downloads: 1` in the plugin's own options made yt-dlp raise
+  `MaxDownloadsReached` -- its normal way of saying "I have what you asked for,
+  stop" -- and TikTok resolves through the playlist machinery, so that happened
+  after a *single* video. Every exception from `extract_info` was treated as a
+  failure. The option was also redundant: `noplaylist` is what actually prevents
+  a playlist. Removed, and the exception is now handled as the control flow it
+  is: the file scan decides whether it really succeeded.
+- A failed TikTok download logged the class name and no message
+  (`TikTok download failed: TikTokDownloadError`), which made the above
+  undiagnosable from the server. The reason is now logged.
 - A mistyped mode (`/ub ai flash ...`) is now answered as a question, with a
   one-line note about the mode that was probably meant. The suggestion only
   fires on a single-edit near-miss: at two, "list", "note", "code" and "more"
