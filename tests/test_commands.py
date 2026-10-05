@@ -97,6 +97,50 @@ async def test_long_arguments_are_truncated_to_the_telegram_limit() -> None:
     assert len(captured[0]) == MAX_MESSAGE_LENGTH
 
 
+def test_clipping_counts_utf16_units_not_code_points() -> None:
+    """Telegram measures a message in UTF-16 code units.
+
+    Every character outside the BMP — an emoji, most of them — is one code point
+    in Python and two units in Telegram. ``len()`` therefore undercounted by
+    exactly a factor of two for emoji-heavy text, and the reply went out over the
+    limit and was refused by Telegram with MESSAGE_TOO_LONG: the plugin had
+    "clipped" the text and the message still did not fit.
+    """
+    from userbot.commands import _clip
+
+    def units(text: str) -> int:
+        return len(text.encode("utf-16-le")) // 2
+
+    # 4096 emoji is 4096 code points but 8192 Telegram units.
+    emoji = "😀" * MAX_MESSAGE_LENGTH
+    clipped = _clip(emoji)
+    assert units(clipped) <= MAX_MESSAGE_LENGTH, units(clipped)
+    assert clipped.endswith("…")
+
+    # Cyrillic is BMP: one unit each, and it must not be clipped short.
+    assert units(_clip("ы" * (MAX_MESSAGE_LENGTH - 1))) == MAX_MESSAGE_LENGTH - 1
+
+    # A surrogate pair must not be split: half of an emoji is not text.
+    for filler in ("a", "ы"):
+        text = filler * MAX_MESSAGE_LENGTH + "😀" * 10
+        result = _clip(text)
+        assert "�" not in result, "the clip split a surrogate pair"
+        assert units(result) <= MAX_MESSAGE_LENGTH
+
+
+async def test_long_emoji_arguments_stay_within_the_telegram_limit() -> None:
+    """The same defect through the dispatcher, where the limit is actually applied."""
+    dispatcher = make_dispatcher()
+    captured: list[str] = []
+
+    async def callback(command) -> None:
+        captured.append(command.args)
+
+    dispatcher.register("long", callback)
+    await dispatcher.handle_event(FakeEvent("/ub long " + "😀" * MAX_MESSAGE_LENGTH))
+    assert len(captured[0].encode("utf-16-le")) // 2 <= MAX_MESSAGE_LENGTH
+
+
 async def test_command_metadata_reaches_the_callback() -> None:
     dispatcher = make_dispatcher()
     seen: list[tuple[str, str, str]] = []

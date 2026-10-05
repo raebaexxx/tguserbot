@@ -13,7 +13,7 @@ from telethon import events
 
 from .topics import TopicAwareEvent
 
-#: Telegram rejects text messages longer than this.
+#: Telegram rejects text messages longer than this, counted in UTF-16 code units.
 MAX_MESSAGE_LENGTH = 4096
 
 #: Matches a `/ub` or `.ub` command at the very start of a message. Telethon
@@ -48,10 +48,33 @@ class CommandRegistration:
     plugin_name: str
 
 
+def _utf16_units(text: str) -> int:
+    """Length in the units Telegram counts.
+
+    Telegram measures a message in UTF-16 code units, not code points. Every
+    character outside the BMP is one code point here and two units there, so
+    ``len()`` understated an emoji-heavy message by a factor of two -- and the
+    clipped text was still over the limit, and refused.
+    """
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
 def _clip(text: str) -> str:
-    if len(text) <= MAX_MESSAGE_LENGTH:
+    """Trim to Telegram's limit, measured the way Telegram measures it."""
+    if _utf16_units(text) <= MAX_MESSAGE_LENGTH:
         return text
-    return text[: MAX_MESSAGE_LENGTH - 1] + "…"
+    budget = MAX_MESSAGE_LENGTH - 1  # room for the ellipsis
+    # Built a code point at a time so a surrogate pair is never cut in half: half
+    # an emoji is not text, it is a replacement character.
+    out: list[str] = []
+    used = 0
+    for character in text:
+        width = 2 if ord(character) > 0xFFFF else 1
+        if used + width > budget:
+            break
+        out.append(character)
+        used += width
+    return "".join(out) + "…"
 
 
 #: Sub-commands accepted by ``/ub plugin``.

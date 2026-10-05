@@ -46,6 +46,15 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **Clipping measured the wrong thing, so a clipped reply could still be too long.**
+  Telegram counts a message in UTF-16 code units; Python's `len()` counts code
+  points. Every character outside the BMP — an emoji, most of them — is one code
+  point and two units, so `len()` understated emoji-heavy text by exactly a
+  factor of two and the "clipped" reply went out at twice the limit and was
+  refused. `_clip` now counts units and trims a code point at a time, so a
+  surrogate pair is never cut in half: half an emoji is not text, it is a
+  replacement character. Cyrillic text, which is BMP and one unit each, is
+  unaffected.
 - **A failed re-adoption destroyed the working plugin.** `install_local` unloaded
   the running plugin, deleted its directory, copied the staged version in and then
   loaded it. If that load failed, the directory was removed and the error
