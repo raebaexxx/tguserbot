@@ -46,6 +46,17 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **A failed re-adoption destroyed the working plugin.** `install_local` unloaded
+  the running plugin, deleted its directory, copied the staged version in and then
+  loaded it. If that load failed, the directory was removed and the error
+  re-raised — so regenerating a plugin badly left the owner with nothing at all:
+  the previous good version was already unloaded, its files were gone, and the
+  error named only the new copy. The outgoing version is now moved aside
+  (`<data_dir>/adopt-backup/<name>`) and, if the new one will not run, moved back
+  and reloaded. The stash lives outside every plugin root on purpose: inside
+  `installed_plugin_dir` the watcher would treat it as a plugin of its own. A
+  rollback that itself fails is logged and does not replace the original error —
+  the reply has to say which version failed, not that restoring it did.
 - **A successful plugin load erased somebody else's error.** The load path ended
   with `mark_error(None, plugin=None)`, which clears the *process-level* error —
   the one the gateway writes when Telegram drops. The first plugin load or reload

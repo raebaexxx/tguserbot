@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -716,8 +717,6 @@ class PluginManager:
 
     @staticmethod
     def _remove_tree(path: Path) -> None:
-        import shutil
-
         shutil.rmtree(path, ignore_errors=True)
 
     # -- adoption -----------------------------------------------------------
@@ -785,11 +784,18 @@ class PluginManager:
             )
 
         target = self.settings.installed_plugin_dir / name
-        old = self._runtimes.get(name)
-        if old is not None:
+        was_running = name in self._runtimes
+        # The previous version is moved aside rather than deleted. Unloading it
+        # first and then failing to load the new one left the owner with nothing:
+        # a bad regeneration cost a working plugin, and the error named only the
+        # new copy. With the old tree kept, the failure can be undone.
+        previous = self._aside_path(name)
+        had_previous = False
+        if was_running:
             await self.unload(name)
         if target.exists():
-            await asyncio.to_thread(self._remove_tree, target)
+            await asyncio.to_thread(shutil.move, str(target), str(previous))
+            had_previous = True
         target.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._copy_tree, source, target)
         # The staged copy stays: it is the record of what was reviewed, and the
@@ -805,18 +811,72 @@ class PluginManager:
                     force=True,
                 )
             if runtime is None:
-                await asyncio.to_thread(self._remove_tree, target)
                 raise PluginLoadError(f"Плагин {name!r} выключен; включите его и повторите")
-            return runtime
-        except Exception:
-            # Leave nothing half-installed behind.
-            await asyncio.to_thread(self._remove_tree, target)
+        except BaseException:
+            await self._undo_failed_install(
+                name=name,
+                target=target,
+                previous=previous if had_previous else None,
+            )
             raise
+        if had_previous:
+            await asyncio.to_thread(self._remove_tree, previous)
+        return runtime
+
+    def _aside_path(self, name: str) -> Path:
+        """Where the outgoing version waits while the new one is tried.
+
+        Outside every plugin root, deliberately. ``installed_plugin_dir`` is
+        scanned by discovery and by the watcher, so a stashed copy sitting beside
+        the live one would be picked up as a plugin of its own.
+        """
+        aside = self.settings.data_dir / "adopt-backup" / name
+        aside.parent.mkdir(parents=True, exist_ok=True)
+        return aside
+
+    async def _undo_failed_install(
+        self,
+        *,
+        name: str,
+        target: Path,
+        previous: Path | None,
+    ) -> None:
+        """Put the outgoing version back, so a failed install costs nothing.
+
+        Three things must be undone: the half-installed copy, the outgoing
+        directory, and the unload. The reload is attempted and its own failure is
+        logged rather than raised, because replacing the original error with a
+        rollback error would hide the reason the install failed in the first
+        place -- the reply says which version failed, not that restoring it did.
+        """
+        await asyncio.to_thread(self._remove_tree, target)
+        if previous is None:
+            return
+        await asyncio.to_thread(shutil.move, str(previous), str(target))
+        try:
+            async with self._operation(name):
+                restored = await self._load_path(
+                    name=name,
+                    path=target,
+                    source="local",
+                    source_ref=None,
+                    source_url=None,
+                    force=True,
+                )
+            if restored is None:
+                self.logger.error(
+                    "Could not reload %s after a failed install: the plugin is disabled",
+                    name,
+                )
+        except Exception:
+            self.logger.exception(
+                "Could not reload %s after a failed install; the previous version is "
+                "back on disk but not running",
+                name,
+            )
 
     @staticmethod
     def _copy_tree(source: Path, target: Path) -> None:
-        import shutil
-
         shutil.copytree(source, target, symlinks=False, dirs_exist_ok=False)
 
     # -- shutdown -----------------------------------------------------------

@@ -267,6 +267,57 @@ async def test_a_failed_load_leaves_nothing_half_installed(wired: tuple[Any, ...
         await storage.close()
 
 
+async def test_a_failed_reinstall_puts_the_working_plugin_back(wired: tuple[Any, ...]) -> None:
+    """Re-adopting a plugin must not cost the working one.
+
+    The install path unloaded the running plugin, deleted its directory and then
+    tried to load the new copy. If that load failed, the directory was removed and
+    the error re-raised -- so a bad regeneration left the owner with no plugin at
+    all: the previous good version was already unloaded and its files were gone,
+    and the failure of the *new* copy was all that was reported. The old copy is
+    now kept aside and restored, and reloaded, when the new one will not run.
+    """
+    settings, storage, manager = wired
+    stage(settings, "keeper", version="0.1.0")
+    try:
+        await manager.install_local("keeper")
+        assert manager.active_count() == 1
+
+        # A version that loads cleanly as a package but fails at setup: the file
+        # is gone by the time this raises, so nothing is left to restart from.
+        stage(
+            settings,
+            "keeper",
+            body=(
+                "from userbot.plugin_api import Plugin as BasePlugin\n\n\n"
+                "class Plugin(BasePlugin):\n"
+                "    async def setup(self, ctx):\n"
+                "        raise RuntimeError('new version is broken')\n"
+            ),
+            version="0.2.0",
+        )
+        # The setup hook's own exception, not a wrapped one: what the owner is told is
+        # the reason the new version would not run.
+        with pytest.raises(RuntimeError, match="new version is broken"):
+            await manager.install_local("keeper")
+
+        restored = manager.get_runtime("keeper")
+        assert restored is not None, "the working plugin was left unloaded"
+        assert restored.manifest.version == "0.1.0", (
+            f"expected the previous version to be restored, got {restored.manifest.version}"
+        )
+        assert (settings.installed_plugin_dir / "keeper" / "plugin.toml").is_file(), (
+            "the installed directory was removed, so nothing is left to load on restart"
+        )
+        # The stashed copy must not linger, and must not sit inside a plugin root
+        # where discovery or the watcher would treat it as a plugin of its own.
+        assert not (settings.data_dir / "adopt-backup" / "keeper").exists()
+        assert manager.discover_local_names().count("keeper") == 1
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
 async def test_regenerating_and_readopting_replaces_the_installed_copy(
     wired: tuple[Any, ...],
 ) -> None:
