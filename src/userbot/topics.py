@@ -184,8 +184,13 @@ async def _send_file_in_topic(
     client = _client_of(event)
     try:
         peer = await client.get_input_entity(event.chat_id)
-        uploaded = await client.upload_file(file)
-        media = await client._file_to_media(uploaded)
+        # ``_file_to_media`` returns ``(file_handle, media, as_image)``. Passing
+        # that tuple on whole is what put every TikTok video in the main thread:
+        # the request failed to serialise, and the fallback below is a plain
+        # reply. So the media is taken out of the tuple, by name.
+        _file_handle, media, _as_image = await client._file_to_media(file)
+        if media is None:
+            raise RuntimeError(f"Telethon produced no media for {file!r}")
         request = functions.messages.SendMediaRequest(
             peer=peer,
             media=media,

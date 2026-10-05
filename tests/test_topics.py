@@ -55,10 +55,23 @@ class FakeEvent:
 
 
 class FakeClient:
+    """A client double with telethon's *real* ``_file_to_media`` contract.
+
+    ``_file_to_media`` returns ``(file_handle, media, as_image)``. The double used
+    to return the media alone, which is what let the defect this file guards
+    against ship: the production code took the whole tuple as the media, the
+    request failed to serialise, and the file fell back to the main thread. The
+    tuple is returned here so the suite fails if the unpacking is ever dropped.
+    """
+
     def __init__(self) -> None:
         self.requests: list[Any] = []
         self.peer = types.InputPeerChat(100)
         self.parse_mode = None
+        #: Set when a request is built with something telethon cannot serialise.
+        #: Serialising is the check: it is what fails on the live path, and it
+        #: needs no network.
+        self.serialise_requests = True
 
     async def get_input_entity(self, _entity: Any) -> Any:
         return self.peer
@@ -70,10 +83,18 @@ class FakeClient:
         return types.InputFile(id=1, parts=0, name="video.mp4", md5_checksum="")
 
     async def _file_to_media(self, file: Any, **kwargs: Any) -> Any:
-        return types.InputMediaUploadedDocument(file=file, mime_type="video/mp4", attributes=[])
+        # Telethon's own helper uploads and converts in one call, taking the
+        # original file; the double does the same so the code under test passes
+        # the same thing to both.
+        handle = await self.upload_file(file, **kwargs)
+        media = types.InputMediaUploadedDocument(file=handle, mime_type="video/mp4", attributes=[])
+        return handle, media, False
 
     async def __call__(self, request: Any) -> Any:
         self.requests.append(request)
+        if self.serialise_requests:
+            # Raises "Cannot cast tuple to any kind of InputMedia" for a bad media.
+            request._bytes()
         return types.Message(id=1, peer_id=self.peer, message="ok", date=None, out=True)
 
 
@@ -277,14 +298,85 @@ async def test_a_file_lands_in_the_topic(topics: Any) -> None:
     await topics.respond_in_topic(event, "caption", file="/tmp/video.mp4")
     assert len(event.client.requests) == 1
     request = event.client.requests[0]
-    assert (
-        isinstance(request, types.InputMediaUploadedDocument.__mro__[0].__mro__[0].__mro__[-2])
-        or True
-    )
     assert isinstance(request.reply_to, types.InputReplyToMessage)
     assert request.reply_to.top_msg_id == 77
     assert request.message == "caption"
     assert event.respond_calls == []
+
+
+async def test_a_file_reply_is_built_from_the_real_telethon_media(
+    topics: Any, tmp_path: Path
+) -> None:
+    """The reported bug: a TikTok video answered in the main thread.
+
+    ``TelegramClient._file_to_media`` returns ``(file_handle, media, as_image)``.
+    The code took that whole tuple as the ``media`` field, so
+    ``SendMediaRequest`` could not serialise it, the call raised, and the
+    fallback put the video in the chat's main thread -- exactly the symptom the
+    report described, one layer below where it was looked for.
+
+    The assertion is on a real Telethon request built by the real method, not on
+    a double shaped to agree with the bug.
+    """
+    from telethon import TelegramClient
+
+    class RecordingClient(TelegramClient):
+        """A real client with only the network replaced.
+
+        Subclassed rather than patched onto an instance: ``client(request)``
+        resolves on the type, so an instance attribute would be ignored and the
+        call would fail as "disconnected" instead of exercising the request.
+        """
+
+        def __init__(self) -> None:
+            super().__init__(
+                str(Path(__file__).resolve().parent / "no-such-session"),
+                api_id=1,
+                api_hash="0" * 32,
+            )
+            self.sent: list[Any] = []
+
+        async def upload_file(self, *_args: Any, **_kwargs: Any) -> Any:
+            return types.InputFile(id=1, parts=0, name="video.mp4", md5_checksum="")
+
+        async def get_input_entity(self, _entity: Any) -> Any:
+            # Answered here rather than through ``__call__``: resolving a peer is
+            # an internal request, and a double that returned the same fake for
+            # every request would make the *lookup* fail instead of the media.
+            return types.InputPeerChat(100)
+
+        async def __call__(self, request: Any) -> Any:
+            self.sent.append(request)
+            request._bytes()
+            return types.Message(
+                id=1, peer_id=types.InputPeerChat(100), message="ok", date=None, out=True
+            )
+
+    real_client = RecordingClient()
+
+    # A real file on disk, because that is what telethon's helper inspects to
+    # work out the mime type and the video attributes.
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64)
+
+    uploaded = await real_client.upload_file(str(video))
+    assert isinstance(await real_client._file_to_media(uploaded), tuple), (
+        "telethon's shape changed: _file_to_media must still return a 3-tuple, "
+        "and topics.py must unpack it rather than pass it as the media"
+    )
+
+    event = FakeEvent(top=77)
+    event.client = cast(Any, real_client)
+
+    await topics.respond_in_topic(event, "caption", file=str(video))
+
+    assert event.respond_calls == [], (
+        "the topic file path fell back to a plain reply, so the video went to "
+        "the main thread: " + repr(event.respond_calls)
+    )
+    assert len(real_client.sent) == 1
+    assert isinstance(real_client.sent[0].media, types.TypeInputMedia)
+    assert real_client.sent[0].reply_to.top_msg_id == 77
 
 
 async def test_a_file_without_a_caption_still_works(topics: Any) -> None:

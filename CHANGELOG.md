@@ -34,6 +34,18 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
 ### Fixed
 
+- **`/ub tt` answered in the main thread even when asked inside a topic.** The
+  video did not bypass the topic wrapper: it went through it, and the file path
+  inside `topics.py` failed. `TelegramClient._file_to_media` returns
+  `(file_handle, media, as_image)`, and the whole tuple was passed as the `media`
+  field of `SendMediaRequest`, which cannot serialise it. The raise was caught by
+  the fallback — a plain `event.respond(file=...)` — so the video arrived in the
+  chat's main thread, which is the reported symptom one layer below where it was
+  looked for. The media is now taken out of the tuple, and a `None` media is an
+  error rather than something to send. The test double in `tests/test_topics.py`
+  returned a bare media object, i.e. it agreed with the bug; it now returns the
+  real three-tuple and serialises each request, and a second test builds the
+  request with a real `TelegramClient` subclass to keep the shape honest.
 - **A spent quota was retried four times with backoff.** `429` was classified as
   retryable, so a condition that cannot recover was given four attempts and the
   real answer was delayed to arrive as an error. `QuotaExhausted` is now separate

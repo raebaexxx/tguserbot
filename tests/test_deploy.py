@@ -713,11 +713,9 @@ def test_the_application_directory_is_not_owned_by_the_service_user() -> None:
     symlink to, and which the operator then runs under sudo.
     """
     installer = INSTALL.read_text(encoding="utf-8")
-    line = re.search(r'^\s*install -d .*\$\{APP_DIR\}.*$', installer, re.M)
+    line = re.search(r"^\s*install -d .*\$\{APP_DIR\}.*$", installer, re.M)
     assert line, "the app directory is not created with install -d any more"
-    assert "-o root" in line.group(0), (
-        f"APP_DIR must be root-owned: {line.group(0).strip()!r}"
-    )
+    assert "-o root" in line.group(0), f"APP_DIR must be root-owned: {line.group(0).strip()!r}"
     assert '"${APP_DIR}" "${DATA_DIR}"' not in line.group(0), (
         "APP_DIR and DATA_DIR must not share one install -d: they need different owners"
     )
