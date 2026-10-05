@@ -189,7 +189,14 @@ class Reply:
 
     @property
     def truncated(self) -> bool:
-        return self.finish_reason in {"MAX_TOKENS", "MAX_TOKENS_TRUNCATED"}
+        return self.finish_reason in TRUNCATION_REASONS
+
+
+#: ``finishReason`` values that mean the answer stopped at the token budget rather
+#: than because the model was done. Both spellings occur: the API returns
+#: ``MAX_TOKENS`` from ``generateContent`` and has been seen returning
+#: ``MAX_TOKENS_TRUNCATED``.
+TRUNCATION_REASONS = frozenset({"MAX_TOKENS", "MAX_TOKENS_TRUNCATED"})
 
 
 @dataclass(slots=True)
@@ -314,6 +321,22 @@ class GeminiClient:
         self.backoff_cap = backoff_cap
         self._client = client
         self._owns_client = client is None
+        #: Why the most recent :meth:`stream` ended, as the API reported it.
+        #: Empty when the stream ended without saying. Reset at the start of every
+        #: stream, so a truncated one can never be read as the state of a later,
+        #: complete one.
+        self.last_finish_reason = ""
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the most recent stream was cut off by the output-token budget.
+
+        Gemini ends a stream that ran into ``maxOutputTokens`` exactly as it ends a
+        finished one, and the only difference is the ``finishReason`` on the last
+        chunk. Discarding that made a cut-off answer indistinguishable from a
+        complete one.
+        """
+        return self.last_finish_reason in TRUNCATION_REASONS
 
     @property
     def has_key(self) -> bool:
@@ -520,6 +543,9 @@ class GeminiClient:
         client = await self._http()
         key = self._next_key()
         url = f"{self.base_url}/models/{model}:streamGenerateContent"
+        # Cleared up front so a truncated stream cannot be read as the state of a
+        # later one.
+        self.last_finish_reason = ""
         last: GeminiError | None = None
         for attempt in range(self.attempts):
             try:
@@ -532,7 +558,9 @@ class GeminiClient:
                         if not last.retryable or attempt + 1 >= self.attempts:
                             raise last
                     else:
-                        async for delta in self._iter_sse(response):
+                        async for delta, reason in self._iter_sse(response):
+                            if reason:
+                                self.last_finish_reason = reason
                             if delta:
                                 yield delta
                         return
@@ -546,8 +574,14 @@ class GeminiClient:
             await self.sleep_backoff(attempt)
         raise last or GeminiError("Gemini: поток прерван")
 
-    @staticmethod
-    async def _iter_sse(response: httpx.Response) -> AsyncIterator[str]:
+    async def _iter_sse(self, response: httpx.Response) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(text, finish_reason)`` per chunk.
+
+        The reason travels with the text rather than being reported at the end,
+        because in an SSE stream the reason is on the *last* chunk -- it arrives
+        with the final text, not after it -- and reading only the text discarded
+        it. Chunks without a reason carry an empty one, which is the normal case.
+        """
         async for line in response.aiter_lines():
             if not line or not line.startswith("data:"):
                 continue
@@ -560,10 +594,11 @@ class GeminiClient:
                 # One malformed line must not kill an otherwise fine stream.
                 continue
             for candidate in chunk.get("candidates") or []:
+                reason = str(candidate.get("finishReason") or "")
                 for part in (candidate.get("content") or {}).get("parts") or []:
                     text = part.get("text")
                     if isinstance(text, str) and text:
-                        yield text
+                        yield text, reason
 
     # -- response parsing ----------------------------------------------------
 
@@ -701,6 +736,16 @@ class ModelRouter:
         for name in self._ordered():
             return name
         return self.models[0]
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the last answer stopped at the output-token budget.
+
+        Read after a :meth:`stream`, where the only evidence is the last chunk's
+        ``finishReason``. The property rather than a value passed back, so the
+        plugins do not each have to remember where the reason lives.
+        """
+        return bool(getattr(self._get_client(), "truncated", False))
 
     @property
     def degraded(self) -> bool:

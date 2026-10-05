@@ -314,6 +314,12 @@ class Plugin(BasePlugin):
             system=SUMMARY_SYSTEM,
             max_output_tokens=ctx.config.int_value("max_output_tokens", 2046),
         )
+        # The summary is a claim about messages the reader cannot see, so one cut
+        # off mid-sentence is worse than one that admits it: it reads as an
+        # exhaustive answer. Noticed here rather than in compose(), because that
+        # is where the other caveats are gathered from.
+        if reply.truncated:
+            collected.notes.append("сводка оборвана: не поместилась в лимит ответа")
         return reply.text
 
     @staticmethod

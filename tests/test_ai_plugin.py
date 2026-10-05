@@ -395,6 +395,96 @@ async def test_the_rollback_only_removes_the_unanswered_question(
     )
 
 
+# --- an answer cut off at the token budget ----------------------------------
+#
+# ``Reply.truncated`` existed from the start and nothing read it. The API ends a
+# stream that ran into maxOutputTokens exactly as it ends a finished one, so a
+# half answer was delivered as a whole one.
+
+
+class TruncatingRouter:
+    """A router double that streams text and then says the stream was cut."""
+
+    def __init__(self, pieces: list[str]) -> None:
+        self.pieces = pieces
+        self.notice_text = ""
+        self.seen: list[Any] = []
+
+    @property
+    def truncated(self) -> bool:
+        return True
+
+    has_key = True
+    active = "test-model"
+    degraded = False
+
+    def notice(self) -> str:
+        return self.notice_text
+
+    async def stream(self, turns: Any, **kwargs: Any) -> Any:
+        self.seen.append(turns)
+        for piece in self.pieces:
+            yield piece
+
+
+async def test_a_truncated_answer_says_it_was_cut(ai_module: Any, tmp_path: Any) -> None:
+    plugin = make_plugin(ai_module, tmp_path)
+    plugin.routers["chat"] = TruncatingRouter(["начало", " и конец"])
+    event = PlaceholderEvent("/ub ai вопрос")
+
+    await plugin.handle(_command(event, "вопрос"))
+
+    assert any("оборван" in text for text in event.responses), event.responses
+    assert any("начало и конец" in text for text in event.responses)
+
+
+async def test_the_truncation_notice_is_not_remembered(ai_module: Any, tmp_path: Any) -> None:
+    """History is replayed to the model; our own output limit is not its business."""
+    plugin = make_plugin(ai_module, tmp_path)
+    plugin.routers["chat"] = TruncatingRouter(["начало"])
+    event = PlaceholderEvent("/ub ai вопрос")
+
+    await plugin.handle(_command(event, "вопрос"))
+
+    turns = await plugin.history(plugin.ctx)
+    assert all("оборван" not in turn.text for turn in turns), [t.text for t in turns]
+
+
+async def test_a_complete_answer_carries_no_notice(ai_module: Any, tmp_path: Any) -> None:
+    """The other side: the notice must not fire on a normal run."""
+    plugin = make_plugin(ai_module, tmp_path, client=FakeClient(pieces=["полный", " ответ"]))
+    event = PlaceholderEvent("/ub ai вопрос")
+
+    await plugin.handle(_command(event, "вопрос"))
+
+    assert not any("оборван" in text for text in event.responses), event.responses
+
+
+async def test_a_truncated_generation_writes_no_plugin(ai_module: Any, tmp_path: Any) -> None:
+    """Half a plugin is not a plugin.
+
+    A truncated generation parses often enough to be adopted, and the failure then
+    shows up as a plugin that quietly does nothing, a long way from here.
+    """
+    truncated = type("Reply", (), {"text": json.dumps({"files": []}), "truncated": True})()
+    client = FakeClient(reply_text="")
+    client.generate = _returning(truncated)  # type: ignore[method-assign]
+    plugin = make_plugin(ai_module, tmp_path, client=client)
+    event = PlaceholderEvent("/ub ai new demo описание")
+
+    await plugin.handle(_command(event, "new demo описание"))
+
+    assert any("не дописала" in text for text in event.responses), event.responses
+    assert not (tmp_path / "data" / "plugin-staging" / "demo").exists()
+
+
+def _returning(reply: Any) -> Any:
+    async def generate(turns: Any, **kwargs: Any) -> Any:
+        return reply
+
+    return generate
+
+
 # --- key configuration -----------------------------------------------------
 
 

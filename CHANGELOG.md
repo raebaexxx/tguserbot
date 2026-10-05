@@ -46,6 +46,18 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **`Reply.truncated` existed and nothing read it.** Gemini ends a stream that ran
+  into `maxOutputTokens` exactly as it ends a finished one — the reason rides on the
+  last chunk — and `_iter_sse` read the text and dropped the reason. A half answer
+  was therefore indistinguishable from a whole one, and `sum` produced a summary
+  that stopped mid-sentence while reading as exhaustive about messages the reader
+  cannot see. The client now records `last_finish_reason` per stream (cleared up
+  front, so a truncated one cannot be read as the state of a later complete one),
+  the router exposes it as `truncated`, and each caller says so: `ai` appends a
+  notice to the answer, `sum` adds it to the caveat list it already keeps. The
+  notice is added to what is *sent*, never to what is *remembered* — history is
+  replayed to the model. A truncated `/ub ai new` now writes nothing at all: half a
+  plugin parses often enough to be adopted, and then fails a long way from here.
 - **A refused answer left a lone `…` in the chat and poisoned the conversation.**
   Two pieces of cleanup sat *after* the stream they belonged to, so the one thing
   that reliably triggers them — a refusal, an expired key, a spent quota — skipped

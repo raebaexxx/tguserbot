@@ -78,6 +78,11 @@ STREAMING_MARK = "…"
 #: Telegram rejects edits faster than this; the real floor is much higher.
 MIN_EDIT_INTERVAL = 0.5
 
+#: Appended when the API stopped at the output-token budget rather than because
+#: the model was done. The stream ends the same way either way, so without this
+#: the reader has no way to tell half an answer from a whole one.
+TRUNCATION_NOTICE = "\n\n_(ответ оборван: не поместился в лимит ответа)_"
+
 
 #: How far a word may be from a mode name and still count as a typo for it.
 #:
@@ -448,7 +453,15 @@ class Plugin(BasePlugin):
             # Nothing came back, so there is no exchange to remember.
             await self._forget(ctx, question)
         else:
-            await command.respond(answer)
+            # A stream cut off by the token budget ends exactly like a finished
+            # one; the only evidence is the reason on its last chunk. Read, and
+            # said out loud, because half an answer that looks whole is worse than
+            # one that admits where it stops.
+            #
+            # The notice is added to what is sent, never to what is remembered:
+            # history is replayed to the model, and a sentence about our own
+            # output limit is not something the next turn should read.
+            await command.respond(answer + (TRUNCATION_NOTICE if router.truncated else ""))
             # Keep the signature so the next turn is a real continuation.
             await self.remember(ctx, Turn("model", [Part(text=answer)]))
         await self._discard(placeholder)
@@ -497,6 +510,16 @@ class Plugin(BasePlugin):
             max_output_tokens=ctx.config.int_value("code_output_tokens", 16384),
             response_schema=PLUGIN_SCHEMA,
         )
+        if reply.truncated:
+            # Half a plugin is not a plugin. It parses often enough to be adopted,
+            # and the failure then surfaces as a plugin that does nothing -- far
+            # from here, and without this explanation anywhere.
+            await command.respond(
+                "Модель не дописала код: ответ оборвался на лимите токенов.\n"
+                "Ничего не записано. Опишите задачу короче или поднимите "
+                "code_output_tokens."
+            )
+            return
         try:
             plugin = parse_generated(reply.text, expected_name=name)
         except GeneratedFileError as exc:

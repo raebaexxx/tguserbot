@@ -415,6 +415,53 @@ def test_an_empty_stream_yields_nothing(client: Any, run: Any) -> None:
     assert run(instance.stream(turns(client))) == []
 
 
+def finish_chunk(text: str, reason: str) -> dict[str, Any]:
+    """A chunk that carries text *and* the reason the model stopped."""
+    return {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": text}], "role": "model"},
+                "finishReason": reason,
+            }
+        ]
+    }
+
+
+def test_a_truncated_stream_says_so(client: Any, run: Any) -> None:
+    """The reason a stream ended was thrown away, so a cut answer looked complete.
+
+    ``_iter_sse`` pulled the text out of each chunk and ignored ``finishReason``
+    entirely. Gemini ends a stream that hit ``maxOutputTokens`` the same way it
+    ends a finished one -- the last chunk simply carries ``MAX_TOKENS`` -- so the
+    user received half an answer with nothing marking the cut, and no way to tell
+    it from a complete one. The client now records the reason it was given.
+    """
+    instance = build(
+        client,
+        lambda _r: httpx.Response(
+            200, content=sse(chunk("начало"), finish_chunk(" конец", "MAX_TOKENS"))
+        ),
+    )
+    assert run(instance.stream(turns(client))) == ["начало", " конец"]
+    assert instance.last_finish_reason == "MAX_TOKENS"
+    assert instance.truncated is True
+
+
+def test_a_complete_stream_is_not_truncated(client: Any, run: Any) -> None:
+    """The other side of the same assertion, so it cannot pass vacuously."""
+    instance = build(client, lambda _r: httpx.Response(200, content=sse(chunk("готово"))))
+    run(instance.stream(turns(client)))
+    assert instance.truncated is False
+
+
+def test_a_stream_that_never_says_why_it_stopped_is_not_a_failure(client: Any, run: Any) -> None:
+    """Chunks without a finishReason are the normal case, not an error."""
+    instance = build(client, lambda _r: httpx.Response(200, content=sse(chunk("ok"))))
+    assert run(instance.stream(turns(client))) == ["ok"]
+    assert instance.last_finish_reason == ""
+    assert instance.truncated is False
+
+
 # --- model listing ----------------------------------------------------------
 
 

@@ -56,8 +56,9 @@ class Message:
 
 
 class Reply:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, truncated: bool = False) -> None:
         self.text = text
+        self.truncated = truncated
 
 
 class RecordingClient:
@@ -65,15 +66,16 @@ class RecordingClient:
 
     has_key = True
 
-    def __init__(self, text: str = "сводка") -> None:
+    def __init__(self, text: str = "сводка", truncated: bool = False) -> None:
         self.text = text
+        self.truncated = truncated
         self.turns: list[Any] = []
         self.kwargs: list[dict[str, Any]] = []
 
     async def generate(self, turns: Any, **kwargs: Any) -> Reply:
         self.turns.append(turns)
         self.kwargs.append(kwargs)
-        return Reply(self.text)
+        return Reply(self.text, self.truncated)
 
     async def stream(self, turns: Any, **kwargs: Any) -> Any:
         raise AssertionError("the summariser does not stream")
@@ -303,6 +305,38 @@ async def test_caveats_are_attached_not_swallowed(sum_module: Any, tmp_path: Pat
     assert "Не учтено" in reply
     assert "медиа не отправляются" in reply
     assert "тема" in reply
+
+
+async def test_a_truncated_summary_says_so(sum_module: Any, tmp_path: Path) -> None:
+    """A summary cut off at the token budget reads as an exhaustive one.
+
+    The reply is a claim about messages the reader cannot see. One that stops
+    mid-sentence without saying so is worse than one that admits the gap, and the
+    caveat list is already the place where this plugin says what it could not do.
+    """
+    messages = [Message(id=1, message="привет")]
+    plugin, ctx, telegram, router = build(sum_module, tmp_path, messages)
+    router._client = RecordingClient(text="сводка оборвалась на полуслове", truncated=True)
+
+    command = Command("", event_for(messages))
+    await plugin.handle(command)
+
+    reply = command.replies[0]
+    assert "сводка оборвана" in reply, reply
+    assert "Не учтено" in reply, reply
+
+
+async def test_a_complete_summary_says_nothing_about_truncation(
+    sum_module: Any, tmp_path: Path
+) -> None:
+    """The other side: a normal summary must not carry a caveat it did not earn."""
+    messages = [Message(id=1, message="привет")]
+    plugin, ctx, telegram, router = build(sum_module, tmp_path, messages)
+
+    command = Command("", event_for(messages))
+    await plugin.handle(command)
+
+    assert "Не учтено" not in command.replies[0], command.replies[0]
 
 
 def _collected(text: str, count: int) -> Any:

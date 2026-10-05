@@ -489,6 +489,17 @@ class RouterFor:
     def degraded(self) -> bool:
         return False
 
+    @property
+    def truncated(self) -> bool:
+        """Whether the last answer was cut off at the token budget.
+
+        A property of the *router*, not the client double behind it, so it is
+        declared here rather than forwarded. A test that wants a truncated answer
+        sets this, the way it sets ``has_key``.
+        """
+
+        return bool(getattr(self._client, "truncated", False))
+
     def notice(self) -> str:
         return ""
 

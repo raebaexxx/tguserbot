@@ -89,8 +89,9 @@ class RecordingGemini:
     #: as a user-facing error, and this stand-in has one.
     has_key = True
 
-    def __init__(self, text: str = "Сводка.") -> None:
+    def __init__(self, text: str = "Сводка.", truncated: bool = False) -> None:
         self.text_body = text
+        self.truncated = truncated
         self.turns: list[Any] = []
         self.parts: list[Any] = []
         self.notices: list[str] = []
@@ -99,7 +100,7 @@ class RecordingGemini:
         self.turns.append(turns)
         self.parts.extend(turns[0].parts)
         self.notices = list(kwargs.get("notices") or [])
-        return SimpleNamespace(text=self.text_body)
+        return SimpleNamespace(text=self.text_body, truncated=self.truncated)
 
     def notice(self) -> str:
         return ""
