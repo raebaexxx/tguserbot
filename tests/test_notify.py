@@ -148,6 +148,117 @@ async def test_the_heartbeat_loop_pings_and_writes(
     assert any(b"WATCHDOG=1" in message for message in drain(server))
 
 
+async def test_the_watchdog_stops_being_fed_when_telegram_is_gone_for_good(
+    app_settings: object, notify_socket: tuple[str, socket.socket], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unrecoverable disconnect must not look healthy forever.
+
+    The ping was sent unconditionally, so an auth key invalidated server-side --
+    which Telethon cannot reconnect from -- left the process feeding the watchdog
+    while doing nothing at all: never restarted, never reporting, indistinguishable
+    from a healthy bot in ``systemctl status``. Telethon exhausts its reconnection
+    attempts and stays disconnected, so the process has to stop claiming liveness;
+    the watchdog then expires and systemd restarts us, and the start path turns
+    the revoked session into the error it is.
+    """
+    from userbot import app as app_module
+
+    path, server = notify_socket
+    monkeypatch.setenv("NOTIFY_SOCKET", path)
+    monkeypatch.setenv("WATCHDOG_PID", str(os.getpid()))
+    monkeypatch.setattr(app_module, "HEARTBEAT_INTERVAL", 0.01)
+    monkeypatch.setattr(app_module, "DISCONNECT_GRACE", 0.03)
+    app, _gateway = make_app(app_settings)  # type: ignore[arg-type]
+
+    # Connected first: the pings below are what proves the stop is caused by the
+    # disconnect and not by the loop never starting.
+    app.health.set_telegram_state(connected=True, authorized=True)
+    task = asyncio.create_task(app._heartbeat_loop())
+    try:
+        await asyncio.sleep(0.05)
+        assert any(b"WATCHDOG=1" in message for message in drain(server)), "no ping while connected"
+
+        # Inside the grace the watchdog is still fed on purpose, so the assertion
+        # is about what happens once the grace has elapsed: two drains, and only
+        # the later one must be free of pings.
+        app.health.set_telegram_state(connected=False, authorized=False)
+        await asyncio.sleep(0.15)
+        during = drain(server)
+        await asyncio.sleep(0.1)
+        after = drain(server)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    assert not any(b"WATCHDOG=1" in message for message in after), (
+        "the watchdog was still fed after the connection was gone for good"
+    )
+    assert any(b"STATUS=" in message for message in during), (
+        "systemctl status must say why the watchdog stopped, or the restart is unexplained"
+    )
+
+
+async def test_a_brief_blip_keeps_the_watchdog_fed(
+    app_settings: object, notify_socket: tuple[str, socket.socket], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Telethon reconnects by itself; a blip must not cost a restart.
+
+    The opposite mistake: stopping the ping on the first disconnected poll would
+    restart the bot every time the network hiccuped.
+    """
+    from userbot import app as app_module
+
+    path, server = notify_socket
+    monkeypatch.setenv("NOTIFY_SOCKET", path)
+    monkeypatch.setenv("WATCHDOG_PID", str(os.getpid()))
+    monkeypatch.setattr(app_module, "HEARTBEAT_INTERVAL", 0.01)
+    monkeypatch.setattr(app_module, "DISCONNECT_GRACE", 10.0)
+    app, _gateway = make_app(app_settings)  # type: ignore[arg-type]
+
+    app.health.set_telegram_state(connected=True, authorized=True)
+    task = asyncio.create_task(app._heartbeat_loop())
+    try:
+        app.health.set_telegram_state(connected=False, authorized=False)
+        await asyncio.sleep(0.05)
+        app.health.set_telegram_state(connected=True, authorized=True)
+        await asyncio.sleep(0.05)
+        messages = drain(server)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    assert any(b"WATCHDOG=1" in message for message in messages)
+
+
+def test_the_disconnect_grace_outlasts_telethons_own_reconnection() -> None:
+    """The grace must exceed the time Telethon itself spends trying to recover.
+
+    Otherwise the process withholds the watchdog in the middle of a reconnect
+    that was about to succeed, and the restart becomes self-inflicted. The budget
+    is read from a real client's defaults rather than hard-coded, so a dependency
+    bump that changes them fails here.
+    """
+    import inspect
+
+    from telethon import TelegramClient
+
+    from userbot import app as app_module
+
+    parameters = inspect.signature(TelegramClient.__init__).parameters
+    retries = int(parameters["connection_retries"].default)
+    delay = float(parameters["retry_delay"].default)
+    connect_timeout = float(parameters["timeout"].default)
+    # Worst case: every attempt burns the connect timeout, then waits the delay.
+    recovery_budget = retries * (connect_timeout + delay)
+
+    assert app_module.DISCONNECT_GRACE > recovery_budget, (
+        f"a {app_module.DISCONNECT_GRACE}s grace cannot outlast Telethon's "
+        f"{recovery_budget:.0f}s reconnection budget"
+    )
+
+
 def test_start_sends_ready_when_systemd_is_present(
     app_settings: object, notify_socket: tuple[str, socket.socket], monkeypatch: pytest.MonkeyPatch
 ) -> None:

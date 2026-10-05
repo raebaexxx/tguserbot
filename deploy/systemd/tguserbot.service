@@ -25,8 +25,13 @@ Restart=on-failure
 RestartSec=15
 # The app must call sd_notify at least every WatchdogSec/2 or systemd restarts it.
 # It does so from the same heartbeat that health monitoring reads, so the two
-# cannot drift apart. Set TGUSERBOT_WATCHDOG=0 to disable when running outside
-# systemd, where WATCHDOG_PID is unset and the notification is skipped anyway.
+# cannot drift apart. Outside systemd WATCHDOG_PID is unset and the ping is
+# skipped, so no switch is needed to turn it off.
+#
+# The process stops feeding the watchdog if Telegram stays unreachable for
+# DISCONNECT_GRACE seconds (see src/userbot/app.py), so that a session revoked
+# server-side ends in a restart and a reported error rather than a healthy-looking
+# service that answers nothing. That grace must stay below WatchdogSec.
 WatchdogSec=60
 # The app bounds its own shutdown with one shared deadline (see
 # SHUTDOWN_TIMEOUT in userbot/app.py). This must stay above that value so the

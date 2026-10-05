@@ -71,6 +71,16 @@ class SystemdNotifier:
             message += f"\nSTATUS={status}"
         return self._send(message)
 
+    def status(self, status: str) -> bool:
+        """Replace the status text ``systemctl status`` shows. Nothing else.
+
+        Used to explain a watchdog that has stopped being fed, which otherwise
+        looks like an unexplained restart in the journal.
+        """
+        if not self._socket:
+            return False
+        return self._send(f"STATUS={status}")
+
     def ping(self) -> bool:
         """Keep the watchdog fed. No-op when no watchdog is configured."""
         if not self.watchdog_enabled:

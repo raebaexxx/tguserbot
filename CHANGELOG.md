@@ -46,6 +46,17 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **A revoked Telegram session left the service looking healthy forever.** The
+  watchdog ping was sent unconditionally, so if Telegram invalidated the auth key
+  server-side — which Telethon cannot reconnect from — the process kept feeding
+  `WATCHDOG=1` while answering nothing: never restarted, no error anywhere, and
+  `systemctl status` green. The heartbeat now withholds the ping once the
+  connection has been down for `DISCONNECT_GRACE` (180s, read against Telethon's
+  own reconnection budget so a healthy reconnect is never cut short) and says so
+  in the journal and in the unit's status text. systemd then restarts the process,
+  and the start path reports the revoked session. The grace is not a restart
+  threshold for blips: inside it the watchdog is still fed on purpose, which is
+  the case the other test pins.
 - **A spent quota was retried four times with backoff.** `429` was classified as
   retryable, so a condition that cannot recover was given four attempts and the
   real answer was delayed to arrive as an error. `QuotaExhausted` is now separate

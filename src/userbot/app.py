@@ -29,6 +29,15 @@ from .watcher import PluginWatcher
 #: How often the watchdog timestamp is refreshed while the app is healthy.
 HEARTBEAT_INTERVAL = 10.0
 
+#: How long the Telegram connection may stay down before the process stops
+#: claiming liveness. Telethon reconnects on its own within seconds, so a blip
+#: must never cost a restart; but an auth key invalidated server-side cannot be
+#: reconnected from, and the process must stop feeding the watchdog rather than
+#: report healthy forever. Must exceed ``WatchdogSec`` in the unit, otherwise
+#: systemd restarts us before the grace has even elapsed and the reconnect never
+#: gets a chance.
+DISCONNECT_GRACE = 180.0
+
 #: Longest a plugin command may run before it is reported as timed out.
 DEFAULT_COMMAND_TIMEOUT = 120.0
 
@@ -188,7 +197,38 @@ class UserbotApp:
         """
         path = self.settings.heartbeat_path
         notify = SystemdNotifier()
+        disconnected_since: float | None = None
+        reported_down = False
         while True:
+            if self.health.telegram_connected:
+                disconnected_since = None
+                reported_down = False
+            elif disconnected_since is None:
+                disconnected_since = time.monotonic()
+            down_for = None if disconnected_since is None else time.monotonic() - disconnected_since
+            if down_for is not None and down_for >= DISCONNECT_GRACE:
+                # Stop feeding the watchdog and let systemd restart us. A revoked
+                # session cannot be reconnected from, so continuing to ping would
+                # leave the service looking healthy while it answers nothing --
+                # and nothing in the journal would say why. The restart runs the
+                # start path, which reports the revoked session as an error.
+                #
+                # Said once per outage: the loop keeps running (and keeps not
+                # pinging) until systemd acts, and a line every 10s would bury
+                # the one that matters.
+                if not reported_down:
+                    reported_down = True
+                    self.logger.error(
+                        "Telegram has been disconnected for %.0fs; stopping the watchdog "
+                        "so the unit restarts the process",
+                        down_for,
+                    )
+                    notify.status(
+                        "Telegram disconnected for over "
+                        f"{DISCONNECT_GRACE:.0f}s; watchdog withheld to force a restart"
+                    )
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                continue
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(str(int(time.time())), encoding="utf-8")
