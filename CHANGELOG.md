@@ -46,6 +46,16 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **A successful plugin load erased somebody else's error.** The load path ended
+  with `mark_error(None, plugin=None)`, which clears the *process-level* error —
+  the one the gateway writes when Telegram drops. The first plugin load or reload
+  after a network blip therefore wiped "Telegram connection lost" from
+  `/ub status`, and the only record that it had happened was gone before anyone
+  read it. A load now clears only its own plugin's error, and the connection
+  clears the connection error when it comes back. Both halves are tested: clearing
+  only the plugin's own error must not leave a failed plugin's error pinned after a
+  later reload succeeds, and a reconnect must not leave a stale connection error on
+  a bot that has been fine for hours.
 - **A revoked Telegram session left the service looking healthy forever.** The
   watchdog ping was sent unconditionally, so if Telegram invalidated the auth key
   server-side — which Telethon cannot reconnect from — the process kept feeding

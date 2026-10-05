@@ -247,6 +247,24 @@ async def test_connection_drop_is_reflected_in_health(app_settings: Settings) ->
         await app.shutdown()
 
 
+async def test_reconnecting_clears_the_connection_error(app_settings: Settings) -> None:
+    """The connection owns its error, so the connection clears it.
+
+    Left to the old accident, the error survived a reconnect unless some plugin
+    happened to reload in between, and /ub status reported a stale "Telegram
+    connection lost" on a bot that had been fine for hours.
+    """
+    app, gateway = make_app(app_settings)
+    await app.start()
+    try:
+        gateway.emit(False)
+        assert app.health.last_error == "Telegram connection lost"
+        gateway.emit(True)
+        assert app.health.last_error is None, "a stale connection error outlived the reconnect"
+    finally:
+        await app.shutdown()
+
+
 # --- core commands ---------------------------------------------------------
 
 

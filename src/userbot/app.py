@@ -184,7 +184,13 @@ class UserbotApp:
     def _on_connection_state(self, *, connected: bool) -> None:
         """Keep the reported Telegram state honest across network drops."""
         self.health.set_telegram_state(connected=connected, authorized=connected)
-        if not connected:
+        if connected:
+            # The connection error belongs to the connection, so the connection
+            # clears it. Nothing else may: a plugin load used to do it as a side
+            # effect, which meant the error vanished only if a plugin happened to
+            # reload, and stayed forever if none did.
+            self.health.mark_error(None)
+        else:
             self.health.mark_error("Telegram connection lost")
 
     async def _heartbeat_loop(self) -> None:

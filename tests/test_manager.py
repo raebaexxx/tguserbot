@@ -163,6 +163,52 @@ async def test_health_counts_reloads(plugin_root: Path, tmp_path: Path) -> None:
         await storage.close()
 
 
+async def test_a_successful_load_does_not_erase_an_unrelated_error(
+    plugin_root: Path, tmp_path: Path
+) -> None:
+    """A plugin loading cleanly must not clear somebody else's failure.
+
+    The load path ended with ``mark_error(None, plugin=None)``, which clears the
+    *process-level* error -- the one the gateway writes when the Telegram
+    connection drops. So the first plugin load or reload after a network blip
+    wiped "Telegram connection lost" from ``/ub status``, and the only evidence
+    it had happened was gone before anybody read it. The error a load owns is
+    its own plugin's, and nothing else.
+    """
+    write_plugin(plugin_root, "alpha", body=make_noop_plugin("alpha"))
+    health = HealthService()
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root, health=health)
+    try:
+        health.mark_error("Telegram connection lost")
+        await manager.load_all_local()
+        assert health.last_error == "Telegram connection lost", (
+            "loading a plugin cleared a process-level error it does not own"
+        )
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
+async def test_a_successful_load_clears_its_own_plugin_error(
+    plugin_root: Path, tmp_path: Path
+) -> None:
+    """The other half: the error a load *does* own must go when it succeeds.
+
+    Fixing the clobbering above must not leave a failed plugin's error pinned for
+    the life of the process after a later reload succeeds.
+    """
+    write_plugin(plugin_root, "alpha", body=make_noop_plugin("alpha"))
+    health = HealthService()
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root, health=health)
+    try:
+        health.mark_error("plugin alpha: boom", plugin="alpha")
+        await manager.load_all_local()
+        assert "alpha" not in health.plugin_errors, health.plugin_errors
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
 # --- reload, disable, enable ----------------------------------------------
 
 

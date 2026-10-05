@@ -377,7 +377,10 @@ class PluginManager:
                 )
                 if old is not None:
                     self.health.reload_count += 1
-                self.health.mark_error(None, plugin=None)
+                # Only this plugin's own error. The process-level error belongs to
+                # whoever raised it -- clearing it here meant the first plugin load
+                # after a Telegram blip erased "connection lost" from /ub status.
+                self.health.mark_error(None, plugin=name)
                 return runtime
             except asyncio.CancelledError:
                 # The critical section above mutates global state (dispatcher
