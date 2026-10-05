@@ -72,6 +72,7 @@ class FakeClient:
         #: Serialising is the check: it is what fails on the live path, and it
         #: needs no network.
         self.serialise_requests = True
+        self._sent_id = 4242
 
     async def get_input_entity(self, _entity: Any) -> Any:
         return self.peer
@@ -95,7 +96,24 @@ class FakeClient:
         if self.serialise_requests:
             # Raises "Cannot cast tuple to any kind of InputMedia" for a bad media.
             request._bytes()
-        return types.Message(id=1, peer_id=self.peer, message="ok", date=None, out=True)
+        # What a real request returns: Updates, not a Message. Telethon's own
+        # send_message narrows it with _get_response_message, and a double that
+        # returned a Message here would hide a caller getting Updates.
+        return types.UpdateShortSentMessage(
+            id=self._sent_id,
+            pts=1,
+            pts_count=1,
+            date=None,
+            out=True,
+        )
+
+    def _get_response_message(self, request: Any, result: Any, input_chat: Any) -> Any:
+        """Telethon's own narrowing, so the double reports what it really is."""
+        if isinstance(result, types.UpdateShortSentMessage):
+            message = result.message
+            message._finish_init(None, {}, None)
+            return message
+        return None
 
 
 @pytest.fixture(scope="module")
@@ -150,6 +168,25 @@ async def test_text_lands_in_the_topic(topics: Any) -> None:
     assert request.reply_to.top_msg_id == 77
     assert request.message == "привет"
     assert event.respond_calls == [], "the topic path must not also call respond"
+
+
+async def test_a_topic_reply_hands_back_a_message_not_updates(topics: Any) -> None:
+    """``client(request)`` returns ``Updates``; callers expect a ``Message``.
+
+    Telethon converts that for its own ``send_message`` by calling
+    ``_get_response_message``, which picks the new message out of the updates by
+    matching the request's ``random_id``. The topic path called the client
+    directly and returned the raw result, so inside a topic ``respond()`` returned
+    an object that has no ``edit_text`` and no ``delete``: the ``ai`` plugin's
+    streaming placeholder could not be edited or removed there, and only inside a
+    topic. That is the live symptom this defect produced.
+    """
+    event = FakeEvent(top=77)
+    sent = await topics.respond_in_topic(event, "привет")
+    assert isinstance(sent, types.Message), (
+        f"respond() returned {type(sent).__name__}; a plugin will try to edit or delete it and fail"
+    )
+    assert sent.id > 0
 
 
 async def test_a_chat_without_topics_uses_respond_unchanged(topics: Any) -> None:
@@ -348,8 +385,25 @@ async def test_a_file_reply_is_built_from_the_real_telethon_media(
         async def __call__(self, request: Any) -> Any:
             self.sent.append(request)
             request._bytes()
-            return types.Message(
-                id=1, peer_id=types.InputPeerChat(100), message="ok", date=None, out=True
+            return types.Updates(
+                updates=[
+                    types.UpdateMessageID(random_id=request.random_id, id=555),
+                    types.UpdateNewMessage(
+                        message=types.Message(
+                            id=555,
+                            peer_id=types.InputPeerChat(100),
+                            message=request.message,
+                            date=None,
+                            out=True,
+                        ),
+                        pts=1,
+                        pts_count=1,
+                    ),
+                ],
+                users=[],
+                chats=[],
+                date=None,
+                seq=1,
             )
 
     real_client = RecordingClient()
@@ -377,6 +431,66 @@ async def test_a_file_reply_is_built_from_the_real_telethon_media(
     assert len(real_client.sent) == 1
     assert isinstance(real_client.sent[0].media, types.TypeInputMedia)
     assert real_client.sent[0].reply_to.top_msg_id == 77
+
+
+async def test_a_topic_reply_is_narrowed_from_a_group_updates_result(
+    topics: Any, tmp_path: Path
+) -> None:
+    """A group answers with ``Updates``, not with the short sent-message shape.
+
+    ``UpdateShortSentMessage`` is what a private chat returns. A forum topic does
+    not, so the narrowing that the other test exercises by hand is the one that
+    actually runs in production -- and it is Telethon's private
+    ``_get_response_message``, so it is checked against Telethon's own code rather
+    than a copy of it.
+    """
+    from telethon import TelegramClient
+
+    class GroupClient(TelegramClient):
+        def __init__(self) -> None:
+            super().__init__(
+                str(Path(__file__).resolve().parent / "no-such-session"),
+                api_id=1,
+                api_hash="0" * 32,
+            )
+
+        async def get_input_entity(self, _entity: Any) -> Any:
+            return types.InputPeerChat(100)
+
+        async def __call__(self, request: Any) -> Any:
+            request._bytes()
+            message = types.Message(
+                id=777,
+                peer_id=types.InputPeerChat(100),
+                message=request.message,
+                date=None,
+                out=True,
+                # The server echoes the reply header back, topic included.
+                reply_to=types.MessageReplyHeader(
+                    reply_to_msg_id=request.reply_to.reply_to_msg_id,
+                    reply_to_top_id=request.reply_to.top_msg_id,
+                    forum_topic=True,
+                ),
+            )
+            return types.Updates(
+                updates=[
+                    types.UpdateMessageID(random_id=request.random_id, id=777),
+                    types.UpdateNewMessage(message=message, pts=1, pts_count=1),
+                ],
+                users=[],
+                chats=[],
+                date=None,
+                seq=1,
+            )
+
+    event = FakeEvent(top=77)
+    event.client = cast(Any, GroupClient())
+
+    sent = await topics.respond_in_topic(event, "привет")
+
+    assert isinstance(sent, types.Message), f"got {type(sent).__name__}"
+    assert sent.id == 777, "the new message must be found by its random_id"
+    assert sent.reply_to.reply_to_top_id == 77, "the message must carry the topic it went to"
 
 
 async def test_a_file_without_a_caption_still_works(topics: Any) -> None:

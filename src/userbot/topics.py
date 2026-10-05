@@ -127,6 +127,55 @@ def _client_of(event: Any) -> Any:
     return client
 
 
+def _sent_message(client: Any, peer: Any, request: Any, result: Any) -> Any:
+    """The message a send produced, out of the ``Updates`` the request returns.
+
+    ``messages.SendMessageRequest`` and ``messages.SendMediaRequest`` answer with
+    ``TypeUpdates``. Telethon's own ``send_message``/``send_file`` narrow that to a
+    ``Message`` before returning it, and the topic path did not: it called the
+    client directly, so ``respond()`` handed back an ``Updates`` inside a topic and
+    a ``Message`` outside one. Anything that edits or deletes its own reply -- the
+    ``ai`` plugin's streaming placeholder -- worked everywhere except in a topic,
+    which is exactly the kind of difference nobody reports as a pattern.
+
+    Both of Telethon's shapes are handled, because Telethon handles both: a short
+    sent-message result for a private chat, and a full updates result with the new
+    message matched by ``random_id``. The helper is Telethon's, not a second
+    implementation of the matching. If it cannot find a message it returns
+    ``None``, and the raw result is passed through -- it is still the truth about
+    the send, and a caller handed something unusable will say so itself.
+    """
+    if isinstance(result, types.UpdateShortSentMessage):
+        message = types.Message(
+            id=result.id,
+            peer_id=peer,
+            message=request.message,
+            date=result.date,
+            out=result.out,
+            media=result.media,
+            entities=result.entities,
+            reply_markup=request.reply_markup,
+            ttl_period=result.ttl_period,
+            reply_to=request.reply_to,
+        )
+        # ``_finish_init`` attaches the client so ``edit``/``delete`` work. It is
+        # private and a version bump could take it; failing to attach is not a
+        # reason to lose the reply, so the message is returned either way.
+        try:
+            message._finish_init(client, {}, peer)
+        except Exception as exc:
+            logger.debug("could not attach the client to the sent message: %s", exc)
+        return message
+    narrow = getattr(client, "_get_response_message", None)
+    if not callable(narrow):
+        return result
+    try:
+        return narrow(request, result, peer) or result
+    except Exception as exc:
+        logger.debug("could not narrow the send result to a message: %s", exc)
+        return result
+
+
 async def respond_in_topic(event: Any, text: str | None = None, **kwargs: Any) -> Any:
     """Reply to an event, staying in its topic when there is one.
 
@@ -161,7 +210,7 @@ async def respond_in_topic(event: Any, text: str | None = None, **kwargs: Any) -
             clear_draft=False,
             reply_to=spec,
         )
-        return await client(request)
+        return _sent_message(client, peer, request, await client(request))
     except Exception as exc:
         # Falling back beats losing the reply. A plain respond() puts it in the
         # main thread, which is wrong but visible; an exception here is neither
@@ -200,7 +249,7 @@ async def _send_file_in_topic(
             clear_draft=False,
             reply_to=spec,
         )
-        return await client(request)
+        return _sent_message(client, peer, request, await client(request))
     except Exception as exc:
         logger.warning("topic file reply failed, falling back to a plain reply: %s", exc)
         return await event.respond(caption or None, file=file)

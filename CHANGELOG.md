@@ -46,6 +46,17 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **`respond()` returned an `Updates` inside a topic and a `Message` outside one.**
+  `messages.SendMessageRequest` and `SendMediaRequest` answer with `TypeUpdates`;
+  Telethon's own `send_message`/`send_file` narrow that to a `Message` before
+  handing it back, and the topic path called the client directly without doing so.
+  Anything that edits or deletes its own reply — the `ai` plugin's streaming
+  placeholder — therefore worked everywhere except inside a topic, which reads as a
+  mysterious difference rather than a bug. Both of Telethon's result shapes are now
+  handled the way Telethon handles them: a short sent-message result for a private
+  chat, and `_get_response_message` for the group result that a forum topic
+  actually returns. If no message can be found the raw result is passed through
+  rather than `None` — it is still the truth about the send.
 - **Clipping measured the wrong thing, so a clipped reply could still be too long.**
   Telegram counts a message in UTF-16 code units; Python's `len()` counts code
   points. Every character outside the BMP — an emoji, most of them — is one code
