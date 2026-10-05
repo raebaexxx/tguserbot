@@ -397,7 +397,14 @@ class Plugin(BasePlugin):
             return
         router = self.require_router(kind)
         await self.ensure_history(ctx)
-        await self.remember(ctx, Turn("user", [Part(text=text)]))
+        # The question goes into the conversation only once there is an answer to
+        # put next to it. It used to be stored before the request, so a refusal --
+        # an expired key, a spent quota -- left a question with nothing after it:
+        # replayed on every later turn, displacing real history inside
+        # max_history_turns, and asking the model to continue a reply that does
+        # not exist. A failed exchange now leaves no trace.
+        question = Turn("user", [Part(text=text)])
+        await self.remember(ctx, question)
         turns = await self.history(ctx)
 
         placeholder = await command.event.respond(STREAMING_MARK)
@@ -411,9 +418,16 @@ class Plugin(BasePlugin):
             await editor.finish()
         except asyncio.CancelledError:
             editor.offer(None)
+            await self._discard(placeholder)
+            await self._forget(ctx, question)
             raise
         except Exception:
             await editor.finish()
+            # Both of these used to live after the block, so a refusal skipped
+            # them: the chat kept a lone "…" that nothing would ever remove, and
+            # the history kept the unanswered question.
+            await self._discard(placeholder)
+            await self._forget(ctx, question)
             raise
         finally:
             worker.cancel()
@@ -431,6 +445,8 @@ class Plugin(BasePlugin):
         # cleaned up afterwards.
         if not answer:
             await command.respond("Модель не вернула текст.")
+            # Nothing came back, so there is no exchange to remember.
+            await self._forget(ctx, question)
         else:
             await command.respond(answer)
             # Keep the signature so the next turn is a real continuation.
@@ -441,6 +457,25 @@ class Plugin(BasePlugin):
             # Only when the configured model is not the one that answered, so a
             # normal run stays silent and a fallback is never mistaken for it.
             await command.respond(notice)
+
+    @staticmethod
+    async def _forget(ctx: PluginContext, question: Turn) -> None:
+        """Take back the question that was stored ahead of an answer.
+
+        Deletes the newest ``user`` row rather than matching on the text: the same
+        question asked twice is two rows, and removing both would also drop the
+        earlier exchange that has a real answer after it.
+        """
+        try:
+            await ctx.storage.execute(
+                "DELETE FROM history WHERE id = ("
+                "  SELECT id FROM history WHERE role = 'user' ORDER BY id DESC LIMIT 1"
+                ")"
+            )
+        except Exception:
+            # A stale question is not worth failing the command over; the next
+            # successful exchange appends after it, and /ub ai reset clears it.
+            LOGGER.warning("ai: could not remove the unanswered question from the history")
 
     @staticmethod
     async def _discard(placeholder: Any) -> None:

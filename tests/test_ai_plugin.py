@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -35,15 +36,23 @@ class FakeStorage:
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
         self.executed: list[tuple[str, Any]] = []
+        self._next_id = 1
 
     async def execute(self, sql: str, parameters: Any = ()) -> int:
         self.executed.append((sql, parameters))
         verb = sql.strip().split(None, 1)[0].upper()
-        if verb == "DELETE":
+        if verb == "DELETE" and "FROM history WHERE id" in sql:
+            # The targeted delete, not "clear everything": a double that wiped
+            # the table would make the rollback test pass for the wrong reason.
+            newest_user = [row for row in self.rows if row["role"] == "user"]
+            if newest_user:
+                self.rows.remove(max(newest_user, key=lambda row: row["id"]))
+        elif verb == "DELETE":
             self.rows.clear()
         elif verb == "INSERT" and "history" in sql:
             role, parts = parameters
-            self.rows.append({"id": len(self.rows) + 1, "role": role, "parts": parts})
+            self.rows.append({"id": self._next_id, "role": role, "parts": parts})
+            self._next_id += 1
         return 0
 
     async def fetchall(self, sql: str, parameters: Any = ()) -> list[dict[str, Any]]:
@@ -106,6 +115,22 @@ def make_plugin(ai_module: Any, tmp_path: Any, client: Any = None, **config: Any
 
 def command_for(args: str) -> Any:
     return type("Cmd", (), {"args": args, "event": None, "respond": None})()
+
+
+def _command(event: Any, args: str) -> Any:
+    """A CommandContext stand-in whose replies land on the event.
+
+    ``ask()`` answers through ``command.respond`` and places its placeholder with
+    ``command.event.respond``, so both have to end up on the same double for the
+    test to see what the chat would have seen.
+    """
+
+    async def respond(text: str, **kwargs: Any) -> None:
+        await event.respond(text, **kwargs)
+
+    # A namespace, not a class: a function in a class body would bind as a method
+    # and receive the instance as its first argument.
+    return SimpleNamespace(args=args, event=event, respond=respond, raw=args, name="ai")
 
 
 # --- the progress editor ---------------------------------------------------
@@ -254,6 +279,120 @@ async def test_reset_clears_the_history(ai_module: Any, tmp_path: Any) -> None:
     assert ctx.storage.rows
     await ctx.storage.execute("DELETE FROM history")
     assert await plugin.history(ctx) == []
+
+
+# --- the two things that survive a failure ---------------------------------
+#
+# Both are the same mistake in two places: the work that must be undone on the
+# error path lives after the call that can fail, so an exception skips it.
+
+
+class PlaceholderEvent(FakeEvent):
+    """A ``FakeEvent`` whose ``respond`` hands back the message it made.
+
+    A real Telethon ``respond`` returns the ``Message``, which is the object a
+    plugin then edits and deletes. Returning ``None`` would make the placeholder
+    undeletable by construction and hide the very defect under test.
+    """
+
+    async def respond(self, text: str | None = None, *, file: str | None = None, **_: Any) -> Any:
+        await super().respond(text, file=file)
+        return self
+
+
+async def test_a_failed_answer_does_not_leave_the_placeholder_behind(
+    ai_module: Any, tmp_path: Any
+) -> None:
+    """A refusal mid-stream left a lone "…" in the chat, forever.
+
+    The placeholder is deleted on the success path, but the stream is wrapped in
+    ``try/except`` that re-raises, so a refusal — an expired key, a spent quota —
+    jumped straight past the delete. What the user was left with was "…" and an
+    error line, with the ellipsis never going away and nothing in it explaining
+    what it had been.
+    """
+    from userbot.gemini import GeminiError
+
+    class Failing(FakeClient):
+        async def stream(self, turns: Any, **kwargs: Any) -> Any:
+            self.seen.append((turns, kwargs))
+            yield "нач"
+            raise GeminiError("quota exhausted")
+
+    plugin = make_plugin(ai_module, tmp_path, client=Failing())
+    event = PlaceholderEvent("/ub ai вопрос")
+    command = _command(event, "вопрос")
+
+    await plugin.handle(command)
+
+    assert event.deleted, "the placeholder survived a failed answer"
+    assert any("quota exhausted" in text for text in event.responses), (
+        "the user must still be told why, not just left with a deleted ellipsis"
+    )
+
+
+async def test_a_failed_answer_does_not_poison_the_history(ai_module: Any, tmp_path: Any) -> None:
+    """A question the model never answered was kept and sent again next time.
+
+    The user's turn is written to storage *before* the request. If the request
+    fails there is no matching model turn, so the conversation keeps a question
+    with no answer: it is replayed on the next question, it displaces real history
+    within ``max_history_turns``, and the model is asked to continue a reply that
+    does not exist. A failed exchange leaves no trace at all.
+    """
+    from userbot.gemini import GeminiError
+
+    class Failing(FakeClient):
+        async def stream(self, turns: Any, **kwargs: Any) -> Any:
+            self.seen.append((turns, kwargs))
+            raise GeminiError("quota exhausted")
+            yield ""  # pragma: no cover - makes this an async generator
+
+    plugin = make_plugin(ai_module, tmp_path, client=Failing())
+    event = FakeEvent("/ub ai вопрос")
+    command = _command(event, "вопрос")
+
+    await plugin.handle(command)
+
+    assert await plugin.history(plugin.ctx) == [], (
+        "the unanswered question is still in the conversation"
+    )
+
+    # And the next question must not carry it either.
+    client = FakeClient()
+    plugin.routers = routers_for(ai_module, client)
+    await plugin.handle(_command(event, "следующий"))
+    sent = client.seen[0][0]
+    assert all(turn.text != "вопрос" for turn in sent), [turn.text for turn in sent]
+
+
+async def test_the_rollback_only_removes_the_unanswered_question(
+    ai_module: Any, tmp_path: Any
+) -> None:
+    """An earlier exchange with a real answer must survive a later failure.
+
+    The rollback removes the newest ``user`` row rather than matching on the
+    text. Matching the text would delete both when the same question is asked
+    twice -- including the earlier copy, which does have an answer after it.
+    """
+    from userbot.gemini import GeminiError
+
+    class Failing(FakeClient):
+        async def stream(self, turns: Any, **kwargs: Any) -> Any:
+            self.seen.append((turns, kwargs))
+            raise GeminiError("quota exhausted")
+            yield ""  # pragma: no cover - makes this an async generator
+
+    plugin = make_plugin(ai_module, tmp_path, client=Failing())
+    ctx = plugin.ctx
+    event = PlaceholderEvent("/ub ai первый")
+    await plugin.ensure_history(ctx)
+    await plugin.handle(_command(event, "повтор"))
+    await plugin.handle(_command(event, "повтор"))
+
+    assert await plugin.history(ctx) == [], (
+        "an earlier answered exchange was destroyed by a later rollback"
+    )
 
 
 # --- key configuration -----------------------------------------------------

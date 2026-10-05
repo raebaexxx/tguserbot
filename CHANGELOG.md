@@ -46,6 +46,16 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **A refused answer left a lone `…` in the chat and poisoned the conversation.**
+  Two pieces of cleanup sat *after* the stream they belonged to, so the one thing
+  that reliably triggers them — a refusal, an expired key, a spent quota — skipped
+  both: the placeholder was never deleted, and the user's question stayed in the
+  history with no answer beside it. The next question replayed that unanswered
+  question, it displaced real history inside `max_history_turns`, and the model
+  was asked to continue a reply that did not exist. Both now happen on the failure
+  path. The rollback removes the newest `user` row rather than matching on the
+  text, because the same question asked twice is two rows and matching would
+  destroy the earlier exchange that does have an answer.
 - **`respond()` returned an `Updates` inside a topic and a `Message` outside one.**
   `messages.SendMessageRequest` and `SendMediaRequest` answer with `TypeUpdates`;
   Telethon's own `send_message`/`send_file` narrow that to a `Message` before
