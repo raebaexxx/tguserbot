@@ -61,6 +61,72 @@ def module_of(manager: PluginManager, name: str) -> str:
     return runtime.loaded.module.__name__
 
 
+# --- names that come from commands ------------------------------------------
+#
+# `/ub plugin reload <name>` and its siblings take the name from Telegram and join
+# it onto a plugin root. Nothing checked the shape first, so a name with a slash in
+# it resolved to a directory outside the root.
+
+
+async def test_a_name_that_climbs_out_of_the_root_is_refused(plugin_root: Path) -> None:
+    """The name is operator input, and a plugin root is not a jail.
+
+    ``local_path`` did ``root / name`` and looked for a ``plugin.toml``. With
+    ``../outside`` that resolves to a directory beside the root: if it holds a
+    manifest, ``/ub plugin reload ../outside`` loads code from outside the tree the
+    watcher, the safety review and every other plugin live in. The manifest inside
+    it is validated, which is not the check that matters -- the check is that the
+    *path* is inside a root.
+    """
+    outside = plugin_root.parent / "outside"
+    outside.mkdir()
+    (outside / "plugin.toml").write_text(
+        'name = "outside"\nversion = "0.1.0"\napi = "1"\nentrypoint = "plugin:Plugin"\n',
+        encoding="utf-8",
+    )
+    (outside / "__init__.py").write_text("from .plugin import Plugin\n", encoding="utf-8")
+    (outside / "plugin.py").write_text(
+        "from userbot.plugin_api import Plugin as BasePlugin\n\n\n"
+        "class Plugin(BasePlugin):\n"
+        "    async def setup(self, ctx):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+
+    manager, storage, client, dispatcher = await build_manager(plugin_root.parent, plugin_root)
+    try:
+        assert manager.local_path("../outside") is None, (
+            "a name reached a directory outside the plugin roots"
+        )
+        with pytest.raises(PluginLoadError):
+            await manager.load_local("../outside")
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
+async def test_a_name_that_is_not_a_name_at_all_is_refused(plugin_root: Path) -> None:
+    """Same reason, cheaper: ``/etc``, ``a/b`` and a backslash are not plugin names."""
+    manager, storage, client, dispatcher = await build_manager(plugin_root.parent, plugin_root)
+    try:
+        for name in ("/etc", "a/b", "..", ".", "", "a\\b", "x\ty"):
+            assert manager.local_path(name) is None, name
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
+async def test_a_normal_name_still_resolves(plugin_root: Path) -> None:
+    """The other side, so the refusal cannot be a blanket one."""
+    write_plugin(plugin_root, "alpha", body=make_noop_plugin("alpha"))
+    manager, storage, client, dispatcher = await build_manager(plugin_root.parent, plugin_root)
+    try:
+        assert manager.local_path("alpha") == plugin_root / "alpha"
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
 # --- discovery and loading -------------------------------------------------
 
 

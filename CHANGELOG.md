@@ -46,6 +46,15 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **A plugin name from a command could leave the plugin roots.** `/ub plugin
+  reload <name>` and its siblings took the name from Telegram and joined it onto a
+  plugin root unchecked: `local_path` did `root / name` and looked for a
+  `plugin.toml`. With `../elsewhere` that resolves to a directory beside the root,
+  and a manifest there is perfectly valid — so the one input that would read code
+  from outside the tree was the one the code validated least. Names are now checked
+  against the same shape a manifest's `name` is held to, before the path is built,
+  with its own error rather than "not found" because a name carrying a separator is
+  not a typo. `_prune_old_revisions` checks too, because that one *deletes*.
 - **`Reply.truncated` existed and nothing read it.** Gemini ends a stream that ran
   into `maxOutputTokens` exactly as it ends a finished one — the reason rides on the
   last chunk — and `_iter_sse` read the text and dropped the reason. A half answer

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,23 @@ DEFAULT_SHUTDOWN_TIMEOUT = 25.0
 
 #: How many installed Git revisions to keep per plugin.
 GIT_KEEP_REVISIONS = 3
+
+#: What a plugin name may look like. The same shape ``PluginManifest`` enforces on
+#: a manifest's ``name``, applied to the name *before* it is joined onto a plugin
+#: root.
+#:
+#: Plugin names arrive from Telegram -- ``/ub plugin reload <name>`` -- and were
+#: joined onto a directory unchecked, so ``../elsewhere`` resolved outside the root.
+#: The manifest in that directory is validated, which is not the check that
+#: matters: the check is that the path stays inside a root before anything is read.
+#: Lowercase, digits, dash and underscore only, so the name is also the same string
+#: on every filesystem.
+PLUGIN_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+
+
+def is_plugin_name(name: str) -> bool:
+    """Whether this string may be used as a plugin name and a directory name."""
+    return bool(PLUGIN_NAME_PATTERN.fullmatch(name))
 
 
 def _revision_mtime(path: Path) -> float:
@@ -136,11 +154,26 @@ class PluginManager:
 
     def local_path(self, name: str) -> Path | None:
         """Where a local plugin with this name lives, or ``None`` if it is not local."""
+        if not is_plugin_name(name):
+            return None
         for root in self.plugin_roots():
             candidate = root / name
             if (candidate / "plugin.toml").is_file():
                 return candidate
         return None
+
+    @staticmethod
+    def _reject_bad_name(name: str) -> None:
+        """Refuse a name that could leave the plugin roots.
+
+        Said as its own error rather than "not found", because "not found" is what
+        the owner sees for a typo, and a name carrying a path separator is not a
+        typo -- it is the one input that would read outside the tree.
+        """
+        if not is_plugin_name(name):
+            raise PluginLoadError(
+                f"Недопустимое имя плагина {name!r}: ожидается [a-z0-9][a-z0-9_-] до 64 символов"
+            )
 
     def _known_names(self) -> set[str]:
         return set(self._scan_local_names()) | set(self._runtimes)
@@ -244,6 +277,7 @@ class PluginManager:
                 self.logger.exception("Could not load persisted Git plugin %s", name)
 
     async def load_local(self, name: str, *, force: bool = False) -> PluginRuntime | None:
+        self._reject_bad_name(name)
         if name in self._disabled:
             await self._mark_disabled(name)
             return None
@@ -261,6 +295,7 @@ class PluginManager:
             )
 
     async def reload_local(self, name: str) -> PluginRuntime | None:
+        self._reject_bad_name(name)
         if name in self._disabled:
             return None
         path = self.local_path(name) or self.settings.plugin_dir / name
@@ -490,6 +525,7 @@ class PluginManager:
         await self.unload(name)
 
     async def enable(self, name: str) -> PluginRuntime | None:
+        self._reject_bad_name(name)
         if name in self._env_disabled:
             raise PluginLoadError(
                 f"Плагин {name!r} выключен в TGUSERBOT_DISABLED_PLUGINS; "
@@ -519,6 +555,7 @@ class PluginManager:
         raise PluginLoadError(f"Плагин {name!r} не найден")
 
     async def disable(self, name: str) -> None:
+        self._reject_bad_name(name)
         if name not in self._known_names():
             state = await self.storage.get_plugin_state(name)
             if state is None:
@@ -654,6 +691,7 @@ class PluginManager:
             raise
 
     async def update_git(self, name: str, ref: str | None = None) -> PluginRuntime:
+        self._reject_bad_name(name)
         runtime = self._runtimes.get(name)
         if runtime is None or runtime.source != "git" or not runtime.source_url:
             raise PluginLoadError(f"Плагин {name!r} не является активным Git-плагином")
@@ -701,6 +739,12 @@ class PluginManager:
         ``_stage_revision`` sets at fetch time. Sorting by directory name would
         order by commit SHA and therefore keep an arbitrary set.
         """
+        if not is_plugin_name(name):
+            # This one deletes. A name with a separator in it would make the
+            # directory below resolve outside the Git plugin root, and everything
+            # pruned from it would be gone.
+            self.logger.error("refusing to prune revisions for an invalid plugin name %r", name)
+            return
         parent = self.settings.git_plugin_dir / name
         try:
             revisions = [path for path in parent.iterdir() if path.is_dir()]
@@ -722,7 +766,14 @@ class PluginManager:
     # -- adoption -----------------------------------------------------------
 
     def staged_path(self, name: str) -> Path:
-        """Where a plugin awaiting review lives. Not a plugin root."""
+        """Where a plugin awaiting review lives. Not a plugin root.
+
+        The name is checked here as well as in :meth:`local_path`, because this one
+        is *written to*: adoption copies whatever it finds at this path into an
+        installed plugin, so a name with a separator in it would stage out of the
+        staging directory entirely.
+        """
+        self._reject_bad_name(name)
         return self.settings.staging_dir / name
 
     def list_staged(self) -> list[dict[str, Any]]:
@@ -765,6 +816,7 @@ class PluginManager:
         was flagged for everything else. A caller that needs to override must say
         so out loud, which is why the parameter exists and is not defaulted.
         """
+        self._reject_bad_name(name)
         source = self.staged_path(name)
         if not (source / "plugin.toml").is_file():
             raise PluginLoadError(
