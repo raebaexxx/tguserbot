@@ -249,6 +249,142 @@ def test_installer_resets_a_failed_unit_state() -> None:
     assert "systemctl reset-failed" in text
 
 
+# --- the installer, run -----------------------------------------------------
+#
+# Everything above reads the script. That cannot tell you the *order* of its steps,
+# and order is the whole of the next two tests.
+
+
+def run_installer(tmp_path: Path, *, service_active: bool) -> list[str]:
+    # The shim is a shell script, so the flag travels as "yes"/"no" rather than as
+    # a Python bool -- which is how the first version of this harness answered
+    # every question "no" without anyone noticing.
+    active = "yes" if service_active else "no"
+    """Run ``install.sh`` with every side effect recorded, and return the log.
+
+    ``systemctl``, ``git``, ``pip``, ``runuser`` and ``useradd`` are replaced with
+    shims on PATH that append their arguments to a log file. Nothing is installed
+    and nothing is started; what comes back is the sequence the script asked for,
+    which is the only thing that can settle whether the service was running when
+    the code changed under it.
+    """
+    log = tmp_path / "calls.log"
+    app_dir = tmp_path / "app"
+    bin_dir = tmp_path / "bin"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir()
+    app_dir.mkdir()
+    # An existing checkout, so the installer takes the `git pull` path. That is the
+    # one that matters here: a fresh clone has no running bot under it.
+    (app_dir / ".git").mkdir()
+
+    for name in ("systemctl", "git", "pip", "useradd", "chown", "install", "ln", "rm"):
+        shim = bin_dir / name
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            f'printf "%s %s\\n" "{name}" "$*" >> "{log}"\n'
+            'if [[ "$1" == "is-active" ]]; then\n'
+            f'  [[ "{active}" == "yes" ]] && exit 0\n'
+            "  exit 3\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+
+    # `runuser -u user -p -- cmd` and the venv's pip are the real commands here.
+    runuser = bin_dir / "runuser"
+    runuser.write_text(
+        '#!/usr/bin/env bash\nprintf \'runuser %s\\n\' "$*" >> "' + str(log) + '"\nexit 0\n',
+        encoding="utf-8",
+    )
+    runuser.chmod(0o755)
+
+    # The venv python has to exist for the installer's guard to pass.
+    python = app_dir / ".venv" / "bin"
+    python.mkdir(parents=True)
+    fake_python = python / "python"
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "TGUSERBOT_APP_DIR": str(app_dir),
+        "TGUSERBOT_DATA_DIR": str(tmp_path / "data"),
+        "TGUSERBOT_CONFIG_DIR": str(tmp_path / "etc"),
+        "TGUSERBOT_SERVICE_USER": os.environ.get("USER", "root"),
+        "TGUSERBOT_REPO_URL": "https://example.invalid/repo.git",
+    }
+    # Skip the root check: CI is not root and the sequence is what is under test.
+    installer = INSTALL.read_text(encoding="utf-8").replace(
+        'if [[ "${EUID}" -ne 0 ]]; then', "if false; then"
+    )
+    script = tmp_path / "install.sh"
+    script.write_text(installer, encoding="utf-8")
+    subprocess.run(
+        ["bash", str(script)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if not log.is_file():
+        return []
+    return log.read_text(encoding="utf-8").splitlines()
+
+
+def test_the_installer_stops_the_service_before_changing_the_code(
+    tmp_path: Path,
+) -> None:
+    """A pull under a running bot is what this fixes.
+
+    ``install.sh`` fetched with ``git pull --ff-only`` while the service was up.
+    Two things went wrong at once: the process kept running code that no longer
+    matched its checkout, and the plugin watcher inside it noticed plugin files
+    changing mid-pull and reloaded from a half-written tree. Neither is visible in
+    the script's text -- it is the order of the calls that matters.
+    """
+    calls = run_installer(tmp_path, service_active=True)
+
+    def index_of(prefix: str) -> int:
+        for position, call in enumerate(calls):
+            if call.startswith(prefix):
+                return position
+        return -1
+
+    stop = index_of("systemctl stop")
+    pull = index_of("git -C")
+    assert stop >= 0, f"the installer never stops the service: {calls}"
+    assert pull >= 0, f"the installer never fetched: {calls}"
+    assert stop < pull, (
+        f"the code was pulled at step {pull} but the service was only stopped at "
+        f"{stop}; a running bot reloads plugins out of a half-updated tree: {calls}"
+    )
+
+
+def test_the_installer_puts_the_service_back(tmp_path: Path) -> None:
+    """Stopping it is only half the fix; a stopped bot is the other failure.
+
+    The installer must start the service again when it found it running, and must
+    not start one that was not running before -- otherwise an installer run used
+    to prepare a box would start the bot on it.
+    """
+    was_running = run_installer(tmp_path / "running", service_active=True)
+    assert any(call.startswith("systemctl start") for call in was_running), (
+        "the service was running before the install and was left stopped"
+    )
+
+    was_stopped = run_installer(tmp_path / "stopped", service_active=False)
+    assert not any(call.startswith("systemctl start") for call in was_stopped), (
+        "the installer started a service that was not running before"
+    )
+    assert not any(call.startswith("systemctl stop") for call in was_stopped), (
+        "nothing was running, so nothing needed stopping"
+    )
+
+
 # --- systemd unit ----------------------------------------------------------
 
 

@@ -27,9 +27,14 @@ The installer creates:
 - the systemd unit `tguserbot.service` and the `/usr/local/bin/tguserbotctl`
   symlink.
 
-It does not create Telegram credentials and does not start the service. It is
-idempotent: re-running it updates the code, keeps your existing
-`userbot.env`, and re-installs the unit.
+It does not create Telegram credentials. It is idempotent: re-running it updates
+the code, keeps your existing `userbot.env`, and re-installs the unit.
+
+Re-running it against a live service **stops the service first** and starts it
+again afterwards, and only if it was running to begin with. The pull rewrites the
+tree the running watcher reads from, so pulling underneath a live bot can leave it
+reloading plugins out of a half-updated checkout. A bot that was stopped stays
+stopped.
 
 Ownership is deliberate: `/opt/tguserbot` stays root-owned and only `.venv`
 belongs to the service user. An earlier version chowned the whole checkout,

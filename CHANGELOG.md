@@ -46,6 +46,16 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **`install.sh` pulled the code out from under a running bot.** It fetched with
+  `git pull --ff-only` while the service was up. Two things went wrong at once: the
+  process kept running code that no longer matched its checkout, and the plugin
+  watcher inside it noticed plugin files changing mid-pull and reloaded from a
+  half-written tree — which is how a bot ends up running a plugin that is not the
+  one on disk. The installer now stops the service before fetching, and starts it
+  again only if it found it running, so preparing a box does not bring a bot up on
+  it. The test harness runs the real script with `systemctl`, `git` and friends
+  replaced by shims and asserts on the *sequence* of calls, because order is the
+  whole of the defect and no amount of reading the script can settle it.
 - **The alert could never have sent anything.** `alert.sh` opened
   `<data_dir>/alert-session`, and nothing in this repository ever authorizes that
   file — `auth` writes `<data_dir>/session` — so `is_user_authorized()` was False on

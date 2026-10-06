@@ -17,6 +17,11 @@ readonly SERVICE_NAME="tguserbot.service"
 log() { printf '[install] %s\n' "$*"; }
 fail() { printf '[install] error: %s\n' "$*" >&2; exit 1; }
 
+#: Whether the service was running when the installer started. Set by
+#: `stop_running_service`, read by `restart_service_if_it_was_running`; the update
+#: must not decide for itself which of those two it is.
+WAS_RUNNING=0
+
 preflight() {
   local missing=()
   command -v git >/dev/null || missing+=("git")
@@ -49,6 +54,33 @@ ensure_directories() {
   install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 700 "${DATA_DIR}"
   install -d -o root -g "${SERVICE_USER}" -m 750 "${CONFIG_DIR}"
   install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 700 "${DATA_DIR}/logs"
+}
+
+stop_running_service() {
+  # Remember whether it was running, then stop it.
+  #
+  # A pull under a live bot is two problems at once. The process keeps running
+  # code that no longer matches its checkout, and the plugin watcher inside it
+  # notices plugin files changing mid-pull and reloads from a half-written tree --
+  # which is how a bot ends up running a plugin that is not the one on disk.
+  # Stopping first makes the update atomic from the bot's point of view.
+  #
+  # Recorded rather than assumed: starting a service that was not running before
+  # would bring up a bot on a box someone was only preparing.
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    WAS_RUNNING=1
+    log "stopping ${SERVICE_NAME} before changing the code under it"
+    systemctl stop "${SERVICE_NAME}"
+  else
+    WAS_RUNNING=0
+  fi
+}
+
+restart_service_if_it_was_running() {
+  if [[ "${WAS_RUNNING}" -eq 1 ]]; then
+    log "starting ${SERVICE_NAME}"
+    systemctl start "${SERVICE_NAME}"
+  fi
 }
 
 fetch_code() {
@@ -116,10 +148,15 @@ install_unit() {
 preflight
 ensure_service_user
 ensure_directories
+# Before fetch_code, and not after: the pull rewrites the tree the running watcher
+# is reading from, and a plugin reloaded out of a half-updated checkout is a
+# failure that only shows up later, in the bot.
+stop_running_service
 fetch_code
 install_dependencies
 install_configuration
 install_unit
+restart_service_if_it_was_running
 
 log "install complete"
 cat <<EOF
