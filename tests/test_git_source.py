@@ -96,7 +96,9 @@ def origin(tmp_path: Path) -> Path:
         ("https://github.com/org/repo", "https://github.com:443/org/repo"),
         ("https://github.com/org/repo/", "https://github.com:443/org/repo"),
         ("https://github.com/org/repo.git", "https://github.com:443/org/repo"),
-        ("https://GitHub.com/Org/Repo", "https://github.com:443/org/repo"),
+        # Host case is normalised: DNS is case-insensitive, so this is the same
+        # host. The path's case is not, and must not be -- see below.
+        ("https://GitHub.com/Org/Repo", "https://github.com:443/Org/Repo"),
         ("  https://github.com/org/repo  ", "https://github.com:443/org/repo"),
         ("ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo"),
         ("git@github.com:org/repo.git", "ssh://git@github.com/org/repo"),
@@ -123,14 +125,42 @@ def test_canonical_repo_url_rejects_unsafe_input(raw: str) -> None:
         canonical_repo_url(raw)
 
 
-def test_allowlist_comparison_is_case_and_suffix_insensitive(tmp_path: Path) -> None:
-    source = GitPluginSource(make_settings(tmp_path, ("https://github.com/Org/Repo.git",)))
-    assert source._validate_url("https://github.com/org/repo") == (
-        "https://github.com:443/org/repo"
+def test_allowlist_comparison_ignores_host_case_and_the_git_suffix(tmp_path: Path) -> None:
+    source = GitPluginSource(make_settings(tmp_path, ("https://GitHub.com/Org/Repo.git",)))
+    assert source._validate_url("https://github.com/Org/Repo") == (
+        "https://github.com:443/Org/Repo"
     )
-    assert source._validate_url("https://GitHub.com/ORG/REPO/") == (
-        "https://github.com:443/org/repo"
+    assert source._validate_url("https://GitHub.com/Org/Repo/") == (
+        "https://github.com:443/Org/Repo"
     )
+
+
+def test_the_allowlist_does_not_fold_the_path_case(tmp_path: Path) -> None:
+    """A host is case-insensitive. A repository path is not, in general.
+
+    GitHub routes paths case-insensitively, and folding the case made the
+    allow-list usable there. It is not a property of Git: a self-hosted Gitea or
+    GitLab can hold ``Team/plugin`` and ``team/plugin`` as two different
+    repositories. So an operator who allow-listed one got the other, on any host
+    that does not fold -- which is a bypass of the one control on this path, and
+    it fails silently by handing over code the owner never listed.
+
+    The cost is that GitHub needs the exact case in the list, and the error says
+    which URL was refused so the operator can fix the entry.
+    """
+    source = GitPluginSource(make_settings(tmp_path, ("https://git.example.com/Team/plugin",)))
+    with pytest.raises(GitSourceError, match="not in TGUSERBOT_GIT_ALLOWED_REPOS"):
+        source._validate_url("https://git.example.com/team/plugin")
+    with pytest.raises(GitSourceError, match="not in TGUSERBOT_GIT_ALLOWED_REPOS"):
+        source._validate_url("https://git.example.com/TEAM/PLUGIN")
+
+
+def test_the_refused_url_is_quoted_in_the_error(tmp_path: Path) -> None:
+    """Otherwise the operator is left guessing which entry to correct."""
+    source = GitPluginSource(make_settings(tmp_path, ("https://git.example.com/Team/plugin",)))
+    with pytest.raises(GitSourceError) as caught:
+        source._validate_url("https://git.example.com/team/plugin")
+    assert "team/plugin" in str(caught.value)
 
 
 def test_allowlist_rejects_a_different_repository(tmp_path: Path) -> None:

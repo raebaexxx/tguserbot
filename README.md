@@ -77,7 +77,7 @@ comments. The ones worth knowing:
 | `TGUSERBOT_LOG_JSON` | `0` | Set to `1` for one JSON object per log line. |
 | `TGUSERBOT_ALERT_CHAT` | empty | Chat ID to notify when the service dies and systemd stops restarting it. |
 | `TGUSERBOT_GEMINI_API_KEY` | empty | API key for the `ai` plugin. Comma-separate several to rotate through them. |
-| `TGUSERBOT_GIT_ALLOWED_REPOS` | empty | Exact repository URLs accepted by the Git plugin source. |
+| `TGUSERBOT_GIT_ALLOWED_REPOS` | empty | Repository URLs the Git plugin source may fetch. Compared after stripping the trailing slash and a `.git` suffix and lower-casing the *host*; the repository path's case is significant, so a GitHub entry must carry the case you will type. |
 
 `owner_ids` is the whole authorisation surface of the bot, and the logged-in
 account is always added to it. Anyone able to use that account can manage

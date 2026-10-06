@@ -46,6 +46,16 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **The Git allow-list folded the repository path's case, which was a bypass.**
+  GitHub routes paths case-insensitively, and that is what the normalisation was
+  for — but it is not a property of Git. A self-hosted Gitea or GitLab can hold
+  `Team/plugin` and `team/plugin` as two unrelated repositories, so an operator who
+  allow-listed one got the other, silently, through the only control on that path.
+  Only the host is folded now (DNS is case-insensitive, so that is the same host);
+  the path keeps its case, and the refusal quotes the URL that was refused so the
+  entry can be corrected without guessing. A GitHub entry now has to carry the
+  case you type, which is the deliberate cost of not having a second repository
+  reachable through the first.
 - **A `.so` or `.pyc` in a staged plugin was skipped, then installed.** The review
   reads source, so `read_tree_sources` drops compiled and native files — correctly,
   there is nothing in them to read. But nothing said so, and adoption copies the

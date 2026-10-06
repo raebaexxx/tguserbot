@@ -68,6 +68,8 @@ def canonical_repo_url(url: str) -> str:
     scp_match = re.match(r"^(?:ssh://)?git@([^:/]+):(.+)$", candidate)
     if scp_match and "://" not in candidate:
         host, path = scp_match.group(1), scp_match.group(2)
+        # Only the host is folded: DNS is case-insensitive, so that is the same
+        # host. The path is not -- see _normalize_repo_path.
         return f"ssh://git@{host.lower()}/{_normalize_repo_path(path)}"
     parsed = urlparse(candidate)
     if not parsed.scheme:
@@ -83,6 +85,8 @@ def canonical_repo_url(url: str) -> str:
     if parsed.scheme not in {"https", "ssh", "http"}:
         raise GitSourceError("Only HTTPS and SSH Git URLs are supported")
     path = _normalize_repo_path(parsed.path)
+    # ``hostname`` is already lower-cased by urlparse, which is the part that may
+    # be folded: DNS does not distinguish case.
     netloc = parsed.hostname or ""
     if parsed.scheme == "http":
         netloc = f"{netloc}:80"
@@ -94,14 +98,28 @@ def canonical_repo_url(url: str) -> str:
 
 
 def _normalize_repo_path(path: str) -> str:
+    """Strip the cosmetic parts of a repository path, and nothing else.
+
+    The trailing slash and the ``.git`` suffix are removed because they cannot
+    change which repository this is. The *case* is left exactly as written, and
+    that is the part this function used to fold.
+
+    It looked like a convenience and was a bypass. GitHub routes paths
+    case-insensitively, so folding made the allow-list usable there -- but it is
+    not a property of Git. A self-hosted Gitea or GitLab can hold ``Team/plugin``
+    and ``team/plugin`` as two unrelated repositories, and an operator who listed
+    one got the other, silently, by way of the one control on this path.
+
+    The price is that a GitHub entry has to carry the case the owner will type.
+    The refusal quotes the URL that was refused, so correcting the entry does not
+    need guessing.
+    """
     normalized = path.strip("/")
     if normalized.endswith(".git"):
         normalized = normalized[: -len(".git")]
     if not normalized:
         raise GitSourceError("Git URL must include a repository path")
-    # Comparison form: hosts we allow treat the path case-insensitively, and a
-    # case-sensitive mismatch would only push operators to widen the allow-list.
-    return normalized.lower()
+    return normalized
 
 
 def _select_source_root(
@@ -152,7 +170,10 @@ class GitPluginSource:
                 "No Git repositories are allowed; set TGUSERBOT_GIT_ALLOWED_REPOS first"
             )
         if normalized not in self.allowed:
-            raise GitSourceError(f"Git repository {url!r} is not in TGUSERBOT_GIT_ALLOWED_REPOS")
+            raise GitSourceError(
+                f"Git repository {url!r} is not in TGUSERBOT_GIT_ALLOWED_REPOS "
+                f"(compared as {normalized!r})"
+            )
         return normalized
 
     @staticmethod
