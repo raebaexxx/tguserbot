@@ -356,6 +356,66 @@ def test_alert_script_is_sound() -> None:
     assert "sending the alert without it" in text
 
 
+def test_the_alert_reuses_the_bot_session() -> None:
+    """The alert opened its own session, which was never authorized.
+
+    ``TelegramClient`` was pointed at ``<data_dir>/alert-session``. Nothing in this
+    repository ever signs that session in -- ``auth`` writes ``<data_dir>/session``
+    -- so ``is_user_authorized()`` was False on every run, and the alert exited 1
+    having sent nothing. The failure mode is the worst one for an alert: it looks
+    like it ran, and the service it exists to report is down.
+
+    It reuses the bot's own session instead. That is safe here precisely because
+    the service has already failed: nothing else holds it, and the whole point is
+    to use the one credential that is known to work.
+    """
+    text = (REPO_ROOT / "deploy" / "alert.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert "alert-session" not in code, (
+        "the alert opens a session nothing ever authorizes; it must reuse the bot's"
+    )
+    assert 'f"{data_dir}/session"' in code, "the alert must use the authorized session path"
+
+
+def test_the_alert_takes_the_session_lock() -> None:
+    """Reusing the session means honouring the single-writer rule.
+
+    The main unit may still be reaped when ``OnFailure=`` fires, and a second
+    writer on one Telegram session corrupts the auth key -- taking the bot's
+    session out of service *because* it went down. ``gateway.acquire_session_lock``
+    is the existing implementation of that rule.
+    """
+    text = (REPO_ROOT / "deploy" / "alert.sh").read_text(encoding="utf-8")
+    assert "flock" in text, "the alert opens the session without taking the lock"
+    assert ".lock" in text, "the lock file name must match the gateway's"
+
+
+def test_the_alert_reports_why_it_could_not_send() -> None:
+    """A silent failure is the failure mode being fixed.
+
+    Once alerting is configured, every remaining exit has to be non-zero and say
+    what stopped it. The one honest ``0`` is "not configured", which is checked
+    before anything can fail.
+    """
+    text = (REPO_ROOT / "deploy" / "alert.sh").read_text(encoding="utf-8")
+    assert "is_user_authorized" in text, "an unauthorized session must be checked for"
+    assert "could not send" in text, "a failed send must say so"
+    assert "is not authorized" in text, "an unauthorized session must say so"
+
+    body = text.split("def main", 1)[1].split("sys.exit(", 1)[0]
+    lines = [line.strip() for line in body.splitlines()]
+    # The only ``return 0`` allowed is the last statement of the function, reached
+    # after a send that succeeded. Anywhere earlier, it reports success having sent
+    # nothing -- which is the failure mode this script had.
+    for index, line in enumerate(lines):
+        if line.startswith("return 0"):
+            remainder = [item for item in lines[index + 1 :] if item and not item.startswith("#")]
+            assert not remainder, (
+                "main() returns 0 and then does more work, so a later failure is "
+                f"reported as success: {remainder[:3]}"
+            )
+
+
 def test_alert_unit_can_read_the_journal() -> None:
     """The alert unit runs as the service user, which is not in the journal group."""
     alert = (REPO_ROOT / "deploy" / "systemd" / "tguserbot-alert@.service").read_text(

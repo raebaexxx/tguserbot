@@ -46,6 +46,18 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **The alert could never have sent anything.** `alert.sh` opened
+  `<data_dir>/alert-session`, and nothing in this repository ever authorizes that
+  file — `auth` writes `<data_dir>/session` — so `is_user_authorized()` was False on
+  every run and the hook exited 1 having sent nothing. The worst failure mode for
+  an alert: it looks like it ran. It now sends through the bot's own session, which
+  is safe precisely because `OnFailure=` only fires once the service has already
+  failed, and takes the same `.lock` the gateway takes to cover the window while
+  the dead process is reaped. If the lock cannot be taken within 5s the alert
+  proceeds anyway — failing to warn is worse than warning with it held — and says
+  so. Found by running the script, not by reading it: the first version of the lock
+  helper was a generator used as a context manager, and it passed `bash -n`,
+  `py_compile` and every text-based test.
 - **CI published a coverage number that excluded a quarter of the code.**
   `pytest --cov=userbot` replaces the `source` configured in `pyproject.toml`, so
   the report was `src/userbot` only — not one `plugins/` file appeared in it — while

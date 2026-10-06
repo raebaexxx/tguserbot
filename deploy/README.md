@@ -163,5 +163,11 @@ sudoedit /etc/tguserbot/userbot.env   # TGUSERBOT_ALERT_CHAT=123456789
 sudo systemctl daemon-reload
 ```
 
-The alert uses its own session file (`alert-session`) under the data directory,
-so it cannot collide with the running bot's session lock.
+The alert sends through the bot's own session, taking the same `.lock` the
+gateway takes. It used to open a separate `alert-session` file, which nothing ever
+authorized — `tguserbotctl auth` writes `session` — so the hook exited non-zero
+having sent nothing, which is the worst way for an alert to fail. Reusing the
+session is safe because `OnFailure=` only fires once the service has already
+failed, and the lock covers the brief window while that process is being reaped;
+if the lock cannot be taken within 5s the alert proceeds anyway, since failing to
+warn is worse than warning with the lock held.
