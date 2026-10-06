@@ -46,6 +46,14 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **CI published a coverage number that excluded a quarter of the code.**
+  `pytest --cov=userbot` replaces the `source` configured in `pyproject.toml`, so
+  the report was `src/userbot` only — not one `plugins/` file appeared in it — while
+  reading as a statement about the whole project. Measured now with the configured
+  source (86% across `src/userbot` + `plugins`, against 90% for `src/userbot`
+  alone), and the floor is named on the command line so the build states what it
+  insists on rather than trusting a setting two files away. `tests/test_docs.py`
+  asserts the two agree, and that the flag which caused this stays gone.
 - **The Git allow-list folded the repository path's case, which was a bypass.**
   GitHub routes paths case-insensitively, and that is what the normalisation was
   for — but it is not a property of Git. A self-hosted Gitea or GitLab can hold

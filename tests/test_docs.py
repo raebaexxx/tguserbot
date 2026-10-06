@@ -22,6 +22,8 @@ TIKTOK_DOC = REPO_ROOT / "docs" / "tiktok-plugin.md"
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 SECURITY = REPO_ROOT / "SECURITY.md"
 UNIT = REPO_ROOT / "deploy" / "systemd" / "tguserbot.service"
+CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 
 def read(path: Path) -> str:
@@ -368,3 +370,61 @@ def test_readme_is_not_stale_about_requirements() -> None:
     text = read(README)
     assert "3.12" in text
     assert "3.14" in text, "the CI matrix tests 3.14; the README should say so"
+
+
+# --- what CI actually measures ---------------------------------------------
+#
+# ``pytest --cov=userbot`` overrides the ``source`` in pyproject, so the report was
+# ``src/userbot`` only: no plugin file appeared in it at all. A quarter of the code
+# that runs in production was invisible to the number the build publishes.
+
+
+def test_ci_measures_what_pyproject_says_to_measure() -> None:
+    """The flag that narrows the measurement must not be on the command.
+
+    Only the commands are checked, not the file: a comment has to be able to name
+    the flag it is warning about, which is most of why this defect survived.
+    """
+    commands = "\n".join(
+        line for line in read(CI).splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
+    assert "--cov=userbot" not in commands, (
+        "--cov=<package> replaces the configured source and silently drops plugins/ from the report"
+    )
+    # Bare ``--cov`` measures what the tests import, and the configured ``source``
+    # is what names the tree; the two must not be swapped for one another.
+    assert "--cov=" not in commands.replace("--cov-report", "").replace("--cov-fail-under", ""), (
+        "an explicit --cov narrows the measurement away from pyproject's source"
+    )
+
+
+def test_ci_fails_when_the_floor_is_not_met() -> None:
+    """A coverage number nobody fails on is a number that drifts down.
+
+    The floor lives in pyproject, where a developer running pytest gets it. CI
+    should name it too, so the build says what it insists on rather than relying on
+    a setting two files away that a future edit could quietly drop.
+    """
+    text = read(CI)
+    assert "--cov-fail-under" in text, "CI does not fail below the coverage floor"
+    import tomllib
+
+    floor = tomllib.loads(read(PYPROJECT))["tool"]["coverage"]["report"]["fail_under"]
+    assert f"--cov-fail-under={floor}" in text, (
+        f"CI and pyproject disagree about the floor (pyproject says {floor})"
+    )
+
+
+def test_the_configured_source_includes_the_plugins() -> None:
+    """The other end of the flag: what CI now measures has to include them."""
+    import tomllib
+
+    source = tomllib.loads(read(PYPROJECT))["tool"]["coverage"]["run"]["source"]
+    assert "plugins" in source, source
+    assert "src/userbot" in source, source
+
+
+def test_the_published_artifact_covers_the_plugins() -> None:
+    """The uploaded XML is what a reader trusts; it must not be a subset."""
+    text = read(CI)
+    assert "if-no-files-found: error" in text

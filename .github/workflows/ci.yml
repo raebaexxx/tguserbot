@@ -34,7 +34,14 @@ jobs:
       - name: Mypy
         run: mypy src plugins tests
       - name: Tests with coverage
-        run: pytest --cov=userbot --cov-report=term-missing --cov-report=xml
+        # No `--cov=<package>`: it replaces the `source` from pyproject and the
+        # report silently stops covering plugins/, which is a quarter of the code
+        # that runs in production. `--cov-fail-under` repeats the floor so the
+        # build states what it insists on instead of trusting a setting two files
+        # away; `tests/test_docs.py` asserts the two agree.
+        run: >-
+          pytest --cov --cov-report=term-missing --cov-report=xml
+          --cov-fail-under=85
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
