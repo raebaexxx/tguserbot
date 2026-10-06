@@ -9,10 +9,13 @@ TimeoutStopSec below the application's own worst-case shutdown.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -416,7 +419,218 @@ def test_the_alert_reports_why_it_could_not_send() -> None:
             )
 
 
-def test_alert_unit_can_read_the_journal() -> None:
+def alert_python_body() -> str:
+    """The Python embedded in ``alert.sh``, as the shell would hand it to python.
+
+    Reading the file cannot tell you this program works: the first version of the
+    lock helper was a generator used as a context manager and passed ``bash -n``,
+    ``py_compile`` and every assertion on the file's text. It is extracted the
+    same way ``exec ... <<'PYTHON'`` does, so what is checked here is what runs.
+    """
+    text = (REPO_ROOT / "deploy" / "alert.sh").read_text(encoding="utf-8")
+    match = re.search(
+        r"^exec \"\$\{PYTHON\}\" - .*<<'PYTHON'\n(.*?)^PYTHON$",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, "the embedded python block was not found"
+    return match.group(1)
+
+
+def test_the_alerts_embedded_python_compiles() -> None:
+    """The cheapest check that catches a broken script: does it parse at all."""
+    compile(alert_python_body(), "alert.sh:PYTHON", "exec")
+
+
+def run_alert_body(
+    tmp_path: Path, env: dict[str, str], session: bool
+) -> subprocess.CompletedProcess[str]:
+    """Run the embedded program against a temporary environment, for real.
+
+    Order of operations is the only way to check a shell script: the paths that
+    matter are which failure fires first, and whether anything is written before
+    it. Every assertion about this script so far has been about its text, and text
+    is what hid the defect above.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    env_file = tmp_path / "userbot.env"
+    env_file.write_text("".join(f"{key}={value}\n" for key, value in env.items()), encoding="utf-8")
+    if session:
+        (data_dir / "session.session").touch()
+    body = alert_python_body().replace(
+        'path: str = "/etc/tguserbot/userbot.env"', f'path: str = "{env_file}"'
+    )
+    script = tmp_path / "body.py"
+    script.write_text(body, encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(script), "tguserbot.service", os.devnull],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_the_alert_refuses_without_a_session_and_says_why(tmp_path: Path) -> None:
+    """No session means no alert, and the reason has to be in the output.
+
+    This is the path the whole change is about, and it is only observable by
+    running: a text assertion cannot tell that the check happens before the
+    client is opened.
+    """
+    result = run_alert_body(
+        tmp_path,
+        {
+            "TGUSERBOT_ALERT_CHAT": "12345",
+            "TGUSERBOT_API_ID": "12345",
+            "TGUSERBOT_API_HASH": "hash",
+            "TGUSERBOT_DATA_DIR": str(tmp_path / "data"),
+        },
+        session=False,
+    )
+    assert result.returncode != 0, "no session is not a success"
+    assert "session" in result.stderr, result.stderr
+
+
+def test_the_alert_never_opens_a_session_of_its_own(tmp_path: Path) -> None:
+    """Checked by what lands on disk, which is what reading the script cannot do.
+
+    The client opens ``<data_dir>/session`` and Telethon writes that file, so a
+    run that got as far as connecting leaves exactly one session behind. The old
+    script left ``alert-session.session`` and nothing else.
+    """
+    result = run_alert_body(
+        tmp_path,
+        {
+            "TGUSERBOT_ALERT_CHAT": "12345",
+            "TGUSERBOT_API_ID": "0",
+            "TGUSERBOT_API_HASH": "hash",
+            "TGUSERBOT_DATA_DIR": str(tmp_path / "data"),
+        },
+        session=True,
+    )
+    produced = sorted(path.name for path in (tmp_path / "data").iterdir())
+    assert "alert-session.session" not in produced, produced
+    assert result.returncode != 0, "an unreachable API is not a success"
+
+
+def test_a_bad_configuration_is_reported_before_the_session_is_touched(
+    tmp_path: Path,
+) -> None:
+    """A non-numeric API id is caught by reading the file, not by dialling out.
+
+    Ordering: the operator gets "TGUSERBOT_API_ID is not an id" and nothing is
+    written, instead of a connection attempt that takes the timeout to fail.
+    """
+    result = run_alert_body(
+        tmp_path,
+        {
+            "TGUSERBOT_ALERT_CHAT": "12345",
+            "TGUSERBOT_API_ID": "not-an-id",
+            "TGUSERBOT_API_HASH": "hash",
+            "TGUSERBOT_DATA_DIR": str(tmp_path / "data"),
+        },
+        session=True,
+    )
+    assert "API_ID" in result.stderr, result.stderr
+    assert sorted(p.name for p in (tmp_path / "data").iterdir()) == ["session.session"]
+
+
+def _write_body(tmp_path: Path, *, without_entrypoint: bool = False) -> Path:
+    """The embedded program, with its environment path pointed at a temp file.
+
+    ``without_entrypoint`` drops the final ``sys.exit(asyncio.run(main()))`` so the
+    module can be *imported* and its helpers driven directly. Only the entry point
+    is removed; the code under test is the file's own.
+    """
+    env_file = tmp_path / "userbot.env"
+    env_file.write_text("", encoding="utf-8")
+    body = alert_python_body().replace(
+        'path: str = "/etc/tguserbot/userbot.env"', f'path: str = "{env_file}"'
+    )
+    if without_entrypoint:
+        # The entry point reads sys.argv, which belongs to pytest here, and exits
+        # through it. Only that is neutralised; the helpers below are the file's
+        # own, untouched.
+        body = body.replace(
+            "SERVICE, JOURNAL = sys.argv[1], sys.argv[2]",
+            'SERVICE, JOURNAL = "tguserbot.service", ""',
+        )
+        body = body.replace("sys.exit(asyncio.run(main()))", "")
+    script = tmp_path / "body.py"
+    script.write_text(body, encoding="utf-8")
+    return script
+
+
+def _import_body(tmp_path: Path) -> Any:
+    """Load the embedded program so its helpers can be called."""
+    import importlib.machinery
+    import importlib.util
+
+    path = _write_body(tmp_path, without_entrypoint=True)
+    spec = importlib.util.spec_from_loader(
+        "alert_body", importlib.machinery.SourceFileLoader("alert_body", str(path))
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_session_lock_helper_is_a_context_manager(tmp_path: Path) -> None:
+    """The helper is *used* as one, and the first version was not.
+
+    Every failure path in this script exits before the lock is reached, so no
+    end-to-end run gets far enough to notice -- which is how a generator with no
+    ``@contextlib.contextmanager`` survived a passing suite, ``bash -n``,
+    ``py_compile`` and every assertion on the file's text. This drives the helper
+    the way ``main()`` does.
+    """
+
+    module = _import_body(tmp_path)
+
+    session = tmp_path / "session"
+    with module.hold_session_lock(str(session)):
+        assert Path(f"{session}.lock").is_file(), "the lock file must exist while held"
+    # Re-entering must not deadlock: the lock is released on the way out, so the
+    # second acquisition succeeds rather than waiting out the timeout.
+    with module.hold_session_lock(str(session)):
+        pass
+
+
+def test_a_contended_lock_does_not_stop_the_alert(tmp_path: Path) -> None:
+    """An alert that refuses to run because of a lock is worse than a late one.
+
+    ``OnFailure=`` can fire while the failed process is still being reaped. The
+    lock is waited for, then the alert proceeds with a warning: the whole reason
+    this script exists is to say the service is down, and it must not be silenced
+    by a lock the dead process has not dropped yet.
+    """
+    import fcntl
+
+    module = _import_body(tmp_path)
+
+    session = tmp_path / "session"
+    session.with_suffix(".session").touch()
+    holder = open(f"{session}.lock", "a+b")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        # A fresh open in this process cannot take it either -- flock is per open
+        # file description, so this is genuine contention, not a re-entry.
+        previous = module.LOCK_TIMEOUT
+        module.LOCK_TIMEOUT = 0.1
+        try:
+            with module.hold_session_lock(str(session)):
+                pass
+        finally:
+            module.LOCK_TIMEOUT = previous
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+
+def test_the_alert_unit_can_read_the_journal() -> None:
     """The alert unit runs as the service user, which is not in the journal group."""
     alert = (REPO_ROOT / "deploy" / "systemd" / "tguserbot-alert@.service").read_text(
         encoding="utf-8"
