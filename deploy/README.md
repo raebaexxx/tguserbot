@@ -94,13 +94,12 @@ first and restart.
 
 ## Hot reload on a server
 
-The watcher is **on by default** (`TGUSERBOT_WATCH` defaults to `1`). The unit
-sets `ProtectSystem=strict`, which makes `/opt/tguserbot/plugins` read-only, so
-a reload there cannot *write* — but it still *tries*, and this matters for
-updates: a `git pull` performed while the service is running looks exactly like a
-plugin edit. The running process still holds the old modules in memory while the
-new sources on disk import from them, and the reload fails on a tree that is not
-broken:
+The watcher is **on by default** (`TGUSERBOT_WATCH` defaults to `1`) and it works
+against the read-only `/opt/tguserbot/plugins` — it only reads. What does not work
+is pulling underneath it: a `git pull` performed while the service is running looks
+exactly like a plugin edit. The running process still holds the old modules in
+memory while the new sources on disk import from them, and the reload fails on a
+tree that is not broken:
 
 ```text
 Cannot load plugin sum: cannot import name 'ModelRouter' from 'userbot.gemini'
@@ -109,16 +108,19 @@ Cannot load plugin sum: cannot import name 'ModelRouter' from 'userbot.gemini'
 `tguserbotctl update` stops the service before pulling, so this cannot happen
 through the supported path. If you pull by hand, stop it yourself first.
 
-To let the watcher actually reload, point the plugin directory at writable
-storage:
+To let the watcher actually reload, nothing is required — it already does, from a
+read-only tree. `ProtectSystem=strict` makes `/opt/tguserbot/plugins` read-only,
+and the watcher only reads: the scan takes file metadata and bytes, and the loader
+compiles the sources in memory rather than importing through a bytecode cache. If
+you would rather not run `git` as root to edit a plugin, point the plugin
+directory somewhere writable and copy your plugins there:
 
 ```toml
 TGUSERBOT_PLUGIN_DIR=/var/lib/tguserbot/plugins
 ```
 
-and copy your plugins there. `/var/lib/tguserbot` is already in the unit's
-`ReadWritePaths`. Alternatively set `TGUSERBOT_WATCH=0` to switch the watcher
-off entirely.
+`/var/lib/tguserbot` is already in the unit's `ReadWritePaths`. Alternatively set
+`TGUSERBOT_WATCH=0` to switch the watcher off entirely.
 
 Git plugin updates are never automatic; use the owner-only
 `/ub plugin update <name>` command after reviewing the commit.

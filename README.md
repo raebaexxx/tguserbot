@@ -249,9 +249,10 @@ result. The review is a denylist, not a sandbox — treat adopted code as truste
 because you just approved it.
 
 **Note on the systemd deployment:** the shipped unit sets `ProtectSystem=strict`,
-which makes `/opt/tguserbot/plugins` read-only, so the watcher cannot fire there.
-Point `TGUSERBOT_PLUGIN_DIR` at a writable path such as
-`/var/lib/tguserbot/plugins` to enable hot reload on a server.
+which makes `/opt/tguserbot/plugins` read-only. Hot reload still works there: the
+watcher only reads, and the loader compiles the sources in memory, so the tree does
+not need to be writable. Point `TGUSERBOT_PLUGIN_DIR` somewhere else only if you
+want to edit plugins without root.
 
 ## Server deployment
 

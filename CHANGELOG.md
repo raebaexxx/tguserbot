@@ -46,6 +46,18 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **Four files claimed the plugin watcher could not run on a read-only tree.** The
+  unit, `deploy/userbot.env.example`, the README and the deploy README all said the
+  watcher "cannot fire" or "cannot hot-reload" against `/opt/tguserbot/plugins`,
+  because `ProtectSystem=strict` makes it read-only. It can, and does: the scan
+  reads file metadata and bytes, the loader compiles the sources in memory, and
+  Python declines to write `__pycache__` into a directory it cannot write and
+  imports anyway — the bytecode cache is an optimisation, not a requirement. This
+  was not a harmless error. It sent operators pointing `TGUSERBOT_PLUGIN_DIR` at a
+  second copy of their plugins on writable storage, so the tree they edited and the
+  tree the bot loaded were two different directories. `tests/test_deploy.py` now
+  loads a plugin from a `chmod 555` directory, which is what settles it, and pins
+  the four statements.
 - **Three settings did nothing.** `max_output_tokens` in the `ai` manifest was
   never passed to the model, so every chat answer was capped by the client's own
   default whatever the operator set — and because the two numbers were the same,

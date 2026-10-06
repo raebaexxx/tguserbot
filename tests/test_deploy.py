@@ -735,6 +735,65 @@ def test_the_session_lock_helper_is_a_context_manager(tmp_path: Path) -> None:
         pass
 
 
+def test_the_watcher_works_against_a_read_only_plugin_directory(tmp_path: Path) -> None:
+    """The watcher only reads. Four files claimed it could not run on a read-only tree.
+
+    ``deploy/systemd/tguserbot.service``, ``deploy/userbot.env.example`` and two
+    places in the READMEs all said the watcher "cannot fire" or "cannot hot-reload"
+    against ``/opt/tguserbot/plugins`` because ``ProtectSystem=strict`` makes it
+    read-only. It can. Nothing in the watch or load path writes to the plugin
+    directory: the scan reads metadata and bytes, and the loader compiles the
+    sources in memory. Python declines to write ``__pycache__`` into a directory it
+    cannot write and imports anyway, because the bytecode cache is an optimisation.
+
+    The claim was not harmless. It sent operators pointing ``TGUSERBOT_PLUGIN_DIR``
+    at a second copy of their plugins on writable storage, so the tree they edited
+    and the tree the bot loaded were two different directories -- and, worse, it
+    hid why ``git pull`` under a running service looks exactly like a plugin edit.
+
+    Proven by loading for real: chmod the directory, load, and require it to work.
+    """
+    import os
+
+    from conftest import make_noop_plugin, write_plugin
+    from userbot.loader import cleanup_loaded_plugin, load_plugin
+
+    plugin = write_plugin(tmp_path, "alpha", body=make_noop_plugin("alpha"))
+    original = plugin.stat().st_mode
+    os.chmod(plugin, 0o555)
+    try:
+        loaded = load_plugin(plugin, "alpha", 1)
+        try:
+            assert loaded.instance is not None, "a read-only directory broke the load"
+            assert not (plugin / "__pycache__").exists(), (
+                "the loader wrote into the plugin directory; if this ever starts "
+                "happening the read-only claim becomes true and the docs change"
+            )
+        finally:
+            cleanup_loaded_plugin(loaded)
+    finally:
+        os.chmod(plugin, original)
+
+
+def test_the_docs_do_not_claim_the_watcher_is_disabled_by_a_read_only_tree() -> None:
+    """Pins the wording, so the next copy of the claim fails here.
+
+    The statements are about four different files and there is no single place to
+    check them, so each is named.
+    """
+    claims = (
+        (UNIT, ("watcher cannot hot-reload", "cannot fire there")),
+        (REPO_ROOT / "deploy" / "userbot.env.example", ("watcher cannot fire",)),
+        (REPO_ROOT / "README.md", ("watcher cannot fire",)),
+        (REPO_ROOT / "deploy" / "README.md", ("cannot hot-reload", "cannot fire")),
+    )
+    for path, phrases in claims:
+        assert path.is_file(), path
+        text = path.read_text(encoding="utf-8").lower()
+        for phrase in phrases:
+            assert phrase not in text, f"{path.name} still claims the watcher {phrase!r}"
+
+
 def test_a_contended_lock_does_not_stop_the_alert(tmp_path: Path) -> None:
     """An alert that refuses to run because of a lock is worse than a late one.
 

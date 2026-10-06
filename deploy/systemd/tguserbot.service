@@ -59,11 +59,15 @@ LockPersonality=true
 RestrictRealtime=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # TGUSERBOT_PLUGIN_DIR defaults to /opt/tguserbot/plugins, which ProtectSystem
-# makes read-only. The watcher therefore cannot hot-reload local plugins here
-# unless the path is added below and pointed at a writable location. To enable
-# it, set TGUSERBOT_PLUGIN_DIR=/var/lib/tguserbot/plugins in userbot.env and add
-#   ReadWritePaths=/var/lib/tguserbot
-# (already present) -- the watcher needs no further access.
+# makes read-only. The watcher hot-reloads from it anyway: it only reads, and the
+# loader compiles the sources in memory. Python declines to write __pycache__ into
+# a directory it cannot write and imports regardless -- the bytecode cache is an
+# optimisation, not a requirement. So hot reload needs no extra access here.
+#
+# This comment previously said the opposite, which sent operators pointing
+# TGUSERBOT_PLUGIN_DIR at a second copy of their plugins on writable storage, so
+# that the tree they edited and the tree the bot loaded were two directories.
+# tests/test_deploy.py loads a plugin from a chmod 555 directory to keep it true.
 ReadWritePaths=/var/lib/tguserbot
 
 [Install]
