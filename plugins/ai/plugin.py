@@ -32,7 +32,7 @@ from userbot.gemini import (
 from userbot.messaging import delete_message, edit_message
 from userbot.plugin_api import Plugin as BasePlugin
 from userbot.plugin_api import PluginContext
-from userbot.safety import format_findings, read_tree_sources, review_tree
+from userbot.safety import format_findings, read_tree_sources, review_plugin_tree, review_tree
 
 from ._codegen import (
     PLUGIN_SCHEMA,
@@ -564,7 +564,7 @@ class Plugin(BasePlugin):
             return
         lines = []
         for path in staged:
-            report = review_tree(read_tree_sources(path))
+            report = review_plugin_tree(path)
             verdict = (
                 "проблемы" if not report.ok else ("предупреждения" if report.findings else "чисто")
             )
@@ -580,7 +580,7 @@ class Plugin(BasePlugin):
             await command.respond(f"В staging нет {name!r}.")
             return
         sources = read_tree_sources(target)
-        report = review_tree(sources)
+        report = review_plugin_tree(target)
         body = format_findings(report.findings) if report.findings else "Замечаний нет."
         await command.respond(
             f"{name}: {', '.join(sorted(sources))}\n\n{body}\n\nУстановить: /ub plugin adopt {name}"

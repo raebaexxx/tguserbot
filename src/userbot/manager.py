@@ -15,7 +15,7 @@ from .loader import PluginLoadError, PluginManifest, cleanup_loaded_plugin, load
 from .logging import get_logger
 from .plugin_api import PluginContext, validate_plugin_interface
 from .plugin_config import PluginConfigError, PluginConfigStore
-from .safety import format_findings, read_tree_sources, review_tree
+from .safety import format_findings, read_tree_sources, review_plugin_tree
 from .storage import PluginStorage, Storage, create_plugin_storage
 from .task_registry import run_uninterruptible
 
@@ -795,7 +795,7 @@ class PluginManager:
             if not path.is_dir() or not (path / "plugin.toml").is_file():
                 continue
             sources = read_tree_sources(path)
-            report = review_tree(sources)
+            report = review_plugin_tree(path)
             result.append(
                 {
                     "name": path.name,
@@ -827,7 +827,7 @@ class PluginManager:
             raise PluginLoadError(
                 f"Имя в plugin.toml ({manifest.name!r}) не совпадает с каталогом ({name!r})"
             )
-        report = review_tree(read_tree_sources(source))
+        report = review_plugin_tree(source)
         if not report.ok and not allow_blocking:
             detail = format_findings(report.blocking)
             raise PluginLoadError(

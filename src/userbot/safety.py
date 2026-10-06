@@ -19,7 +19,16 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["Finding", "SafetyReport", "review_source", "review_tree"]
+__all__ = [
+    "Finding",
+    "SafetyReport",
+    "binary_artifacts",
+    "format_findings",
+    "read_tree_sources",
+    "review_plugin_tree",
+    "review_source",
+    "review_tree",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,10 +413,25 @@ def review_source(source: str, path: str = "<generated>") -> SafetyReport:
 
 
 def review_tree(files: dict[str, str]) -> SafetyReport:
-    """Review every ``.py`` in a mapping of relative path to source."""
+    """Review every ``.py`` in a mapping of relative path to source.
+
+    A compiled or native file handed in here is a finding rather than a skip, for
+    the same reason :func:`review_plugin_tree` reports one: a tree can carry code
+    that this never reads, and the reader has to be told which.
+    """
     findings: list[Finding] = []
     reviewed = 0
     for path in sorted(files):
+        if _is_unreadable_code(path):
+            findings.append(
+                Finding(
+                    path=path,
+                    line=0,
+                    severity="high",
+                    reason="двоичный файл, который проверка прочитать не может",
+                )
+            )
+            continue
         if not path.endswith(".py"):
             continue
         reviewed += 1
@@ -430,6 +454,16 @@ MAX_SOURCE_BYTES = 512 * 1024
 #: Files that are never worth reading, and that would be a red flag themselves.
 _SKIP_SUFFIXES = (".session", ".sqlite3", ".pyc", ".so", ".dylib", ".dll", ".jar")
 
+#: The subset of those that are *code*: compiled Python, or native code. A tree
+#: carrying one of these is refused rather than reviewed, because there is nothing
+#: to read -- and adoption copies the whole tree, so a skipped file here is a file
+#: that gets installed having never been looked at.
+_UNREADABLE_CODE_SUFFIXES = (".pyc", ".pyo", ".so", ".dylib", ".dll")
+
+
+def _is_unreadable_code(path: str) -> bool:
+    return path.lower().endswith(_UNREADABLE_CODE_SUFFIXES)
+
 
 def read_tree_sources(root: Path, max_bytes: int = MAX_SOURCE_BYTES) -> dict[str, str]:
     """Read every reviewable source file under ``root``, keyed by relative path.
@@ -438,6 +472,10 @@ def read_tree_sources(root: Path, max_bytes: int = MAX_SOURCE_BYTES) -> dict[str
     ``/etc/tguserbot/userbot.env`` would otherwise be reviewed as if it were part
     of the plugin, and one pointing outside the tree is a way to smuggle code in
     past a reviewer who only reads what ``read_tree_sources`` returned.
+
+    Compiled and native files are skipped too, because there is no source in them
+    to review -- :func:`binary_artifacts` is what turns their presence into a
+    finding, so skipping them here is not the same as ignoring them.
     """
     sources: dict[str, str] = {}
     total = 0
@@ -461,3 +499,44 @@ def read_tree_sources(root: Path, max_bytes: int = MAX_SOURCE_BYTES) -> dict[str
             break
         sources[relative] = text
     return sources
+
+
+def binary_artifacts(root: Path) -> tuple[str, ...]:
+    """Compiled or native files in a tree, which the review cannot read.
+
+    Reported rather than dropped. The review is a denylist over source, and this is
+    source that is not there: a ``.so`` beside a clean ``plugin.py`` would
+    otherwise be installed having been seen by nobody, and the report would say
+    everything is fine.
+    """
+    found: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if _is_unreadable_code(relative):
+            found.append(relative)
+    return tuple(found)
+
+
+def review_plugin_tree(root: Path) -> SafetyReport:
+    """Review a plugin directory: its sources, and what cannot be reviewed.
+
+    The one place the two are combined, so adoption and the pre-adoption listing
+    cannot disagree about whether a tree is safe.
+    """
+    report = review_tree(read_tree_sources(root))
+    findings = list(report.findings)
+    for relative in binary_artifacts(root):
+        findings.append(
+            Finding(
+                path=relative,
+                line=0,
+                severity="high",
+                reason=(
+                    "двоичный файл, который проверка прочитать не может: "
+                    "скомпилированный или нативный код"
+                ),
+            )
+        )
+    return SafetyReport(findings=tuple(findings), files_reviewed=report.files_reviewed)

@@ -46,6 +46,16 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **A `.so` or `.pyc` in a staged plugin was skipped, then installed.** The review
+  reads source, so `read_tree_sources` drops compiled and native files — correctly,
+  there is nothing in them to read. But nothing said so, and adoption copies the
+  *whole* staged tree into the installed plugin. A tree could therefore carry a
+  native library or compiled bytecode that no reviewer ever saw, installed under a
+  report reading "Замечаний нет". The one kind of file the review cannot check is
+  the one that must not pass unnoticed: `review_plugin_tree` is now the single
+  place the sources and the unreadable files are combined, so adoption and the
+  pre-adoption listing cannot disagree about whether a tree is safe, and either
+  refuses.
 - **A plugin name from a command could leave the plugin roots.** `/ub plugin
   reload <name>` and its siblings took the name from Telegram and joined it onto a
   plugin root unchecked: `local_path` did `root / name` and looked for a

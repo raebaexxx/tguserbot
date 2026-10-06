@@ -449,3 +449,52 @@ def test_read_tree_sources_respects_a_size_cap(tmp_path: Path) -> None:
     (tmp_path / "small.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "large.py").write_text("y = 2\n" * 1000, encoding="utf-8")
     assert set(read_tree_sources(tmp_path, max_bytes=50)) == {"small.py"}
+
+
+async def test_a_binary_in_a_staged_tree_blocks_adoption(wired: tuple[Any, ...]) -> None:
+    """A file the review cannot read must be a refusal, not a skipped file.
+
+    ``read_tree_sources`` drops ``.pyc`` and ``.so`` -- correctly, there is no
+    source to read -- but nothing said so, and adoption copies the *whole* staged
+    tree into the installed plugin. So a staged tree could carry a native library or
+    compiled bytecode that no reviewer ever saw, installed under a report that read
+    "Замечаний нет". The one kind of file in the tree that cannot be checked is
+    exactly the one that must not pass unnoticed.
+    """
+    settings, storage, manager = wired
+    stage(settings, "clean")
+    (settings.staging_dir / "clean" / "helper.so").write_bytes(b"\x7fELF\x02\x01\x01")
+    try:
+        with pytest.raises(PluginLoadError, match="безопасност"):
+            await manager.install_local("clean")
+        assert not (settings.installed_plugin_dir / "clean").exists()
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
+async def test_a_staged_binary_is_shown_before_adopting(wired: tuple[Any, ...]) -> None:
+    """``/ub plugin adopt`` shows what it is agreeing to; it must name this too."""
+    settings, storage, manager = wired
+    stage(settings, "clean")
+    (settings.staging_dir / "clean" / "mod.cpython-312.pyc").write_bytes(b"\x00\x01")
+    try:
+        staged = {item["name"]: item for item in manager.list_staged()}
+        report = staged["clean"]["report"]
+        assert not report.ok, report.summary()
+        assert any(".pyc" in finding.path for finding in report.blocking), report.summary()
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
+async def test_a_clean_tree_is_not_blocked(wired: tuple[Any, ...]) -> None:
+    """The other side: an ordinary plugin must still pass."""
+    settings, storage, manager = wired
+    stage(settings, "clean")
+    try:
+        runtime = await manager.install_local("clean")
+        assert runtime.name == "clean"
+    finally:
+        await manager.shutdown()
+        await storage.close()
