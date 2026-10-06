@@ -417,7 +417,14 @@ class Plugin(BasePlugin):
         worker = asyncio.create_task(editor.run())
         pieces: list[str] = []
         try:
-            async for delta in router.stream(turns, system=CHAT_SYSTEM):
+            async for delta in router.stream(
+                turns,
+                system=CHAT_SYSTEM,
+                # The manifest's budget. It was never passed, so every chat answer
+                # was capped by the client's own default whatever the operator set
+                # -- and because the two numbers matched, nothing looked wrong.
+                max_output_tokens=ctx.config.int_value("max_output_tokens", 4096),
+            ):
                 pieces.append(delta)
                 editor.offer("".join(pieces))
             await editor.finish()

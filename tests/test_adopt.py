@@ -413,6 +413,37 @@ def test_the_installed_root_is_writable_and_the_shipped_root_is_not_assumed_to_b
     assert settings.installed_plugin_dir.is_relative_to(settings.data_dir)
 
 
+def test_the_installed_root_cannot_be_pointed_outside_the_data_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``TGUSERBOT_INSTALLED_PLUGIN_DIR`` was an escape hatch with nothing behind it.
+
+    It was undocumented, untested, and its only effect was to break the one
+    invariant the installed root exists for: it has to live under the writable data
+    directory, because the shipped tree is root-owned and read-only under
+    ``ProtectSystem=strict``. Set it, and adoption writes somewhere the service
+    user may not be able to write, or somewhere nothing scans -- and the symptom is
+    a plugin that was adopted and then never loads. A knob that can only break the
+    thing it configures is not a knob.
+
+    The setting is gone; this pins that it stays gone rather than being quietly
+    reintroduced by someone who remembers it existing.
+    """
+    monkeypatch.setenv("TGUSERBOT_INSTALLED_PLUGIN_DIR", str(tmp_path / "elsewhere"))
+    settings = Settings(
+        root_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        plugin_dir=tmp_path / "plugins",
+        log_dir=tmp_path / "data" / "logs",
+        api_id=1,
+        api_hash="test",
+    )
+    assert settings.installed_plugin_dir.is_relative_to(settings.data_dir), (
+        "the installed plugin root moved outside the writable data directory"
+    )
+
+
 def test_a_missing_root_is_skipped_without_error(settings: Settings) -> None:
     assert readonly_manager(settings).discover_local_names() == []
 

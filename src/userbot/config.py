@@ -95,15 +95,19 @@ class Settings:
     def installed_plugin_dir(self) -> Path:
         """Root for plugins the operator installed at runtime.
 
-        Deliberately *not* ``plugin_dir``. The shipped tree is root-owned and
-        made read-only by ``ProtectSystem=strict``, so writing an adopted plugin
-        there fails in production while succeeding in development. Keeping
-        runtime-installed plugins under the writable data directory means the
-        same code path works in both, and the shipped code stays untamperable.
+        Deliberately *not* ``plugin_dir``, and deliberately not configurable. The
+        shipped tree is root-owned and made read-only by ``ProtectSystem=strict``,
+        so writing an adopted plugin there fails in production while succeeding in
+        development. Keeping runtime-installed plugins under the writable data
+        directory means the same code path works in both, and the shipped code
+        stays untamperable.
+
+        ``TGUSERBOT_INSTALLED_PLUGIN_DIR`` used to override this, and was the worst
+        kind of setting: undocumented, untested, and able only to break the one
+        invariant the directory exists to hold. Point it somewhere the service user
+        cannot write and adoption fails; point it somewhere nothing scans and a
+        plugin is adopted and then never loads. Removed.
         """
-        override = os.environ.get("TGUSERBOT_INSTALLED_PLUGIN_DIR")
-        if override:
-            return Path(override).expanduser()
         return self.data_dir / "local-plugins"
 
     @property

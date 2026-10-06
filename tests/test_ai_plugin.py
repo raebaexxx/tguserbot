@@ -460,6 +460,26 @@ async def test_a_complete_answer_carries_no_notice(ai_module: Any, tmp_path: Any
     assert not any("оборван" in text for text in event.responses), event.responses
 
 
+async def test_the_configured_output_budget_reaches_the_request(
+    ai_module: Any, tmp_path: Any
+) -> None:
+    """``max_output_tokens`` was in the manifest and never passed to the model.
+
+    A chat answer was capped by the client's own default no matter what the
+    operator set, and because the two numbers happened to be the same, nothing
+    looked wrong. Now a longer budget is a request that asks for it.
+    """
+    plugin = make_plugin(ai_module, tmp_path, max_output_tokens=32100)
+    event = PlaceholderEvent("/ub ai вопрос")
+
+    await plugin.handle(_command(event, "вопрос"))
+
+    client = plugin.routers["chat"]._client
+    assert client.seen, "nothing was sent"
+    turns, kwargs = client.seen[0]
+    assert kwargs["max_output_tokens"] == 32100, kwargs
+
+
 async def test_a_truncated_generation_writes_no_plugin(ai_module: Any, tmp_path: Any) -> None:
     """Half a plugin is not a plugin.
 

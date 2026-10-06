@@ -46,6 +46,22 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   returned a bare media object, i.e. it agreed with the bug; it now returns the
   real three-tuple and serialises each request, and a second test builds the
   request with a real `TelegramClient` subclass to keep the shape honest.
+- **Three settings did nothing.** `max_output_tokens` in the `ai` manifest was
+  never passed to the model, so every chat answer was capped by the client's own
+  default whatever the operator set — and because the two numbers were the same,
+  nothing looked wrong; it is wired up now, and there is a test that a larger
+  budget reaches the request. `require_confirm` was a promise to ask before
+  generating, read by nothing, and removed rather than implemented: generation
+  only ever writes to the staging directory, which cannot load anything on its
+  own, and adoption is already a separate explicit command.
+  `TGUSERBOT_INSTALLED_PLUGIN_DIR` was undocumented, untested, and able only to
+  break the one invariant its directory exists to hold — the installed root has to
+  be under the writable data directory, because the shipped tree is read-only under
+  `ProtectSystem=strict`. Point it at an unwritable place and adoption fails; point
+  it somewhere nothing scans and a plugin is adopted and then never loads.
+  `tests/test_plugin_settings.py` now asserts that every key under `[config]` in
+  every shipped manifest is read by that plugin's own source, which catches the
+  class rather than these three.
 - **`install.sh` pulled the code out from under a running bot.** It fetched with
   `git pull --ff-only` while the service was up. Two things went wrong at once: the
   process kept running code that no longer matched its checkout, and the plugin

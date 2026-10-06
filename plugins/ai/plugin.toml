@@ -37,7 +37,14 @@ pro_model = "gemini-3.1-pro-preview"
 base_url = "https://generativelanguage.googleapis.com/v1beta"
 
 timeout_seconds = 120
+
+#: Output budget for a chat answer. Raising it is how you get a long answer that is
+#: not cut off; the reply says so when the model stops at the limit.
 max_output_tokens = 4096
+
+#: Output budget for `/ub ai new`. Generation is code, and code that stops
+#: half-written is worse than code that was refused, so it gets its own larger
+#: budget and a truncated result is written nowhere at all.
 code_output_tokens = 16384
 
 #: Seconds of conversation kept. Each turn is resent, so this is the real cost
@@ -47,7 +54,3 @@ max_history_turns = 20
 #: Floor between progress edits. Telegram throttles aggressive editors, and an
 #: edit every token is exactly how that gets earned.
 min_edit_interval = 3.0
-
-#: Ask before generating. Off by default because generation only ever writes to
-#: the staging directory, which cannot load anything on its own.
-require_confirm = true
