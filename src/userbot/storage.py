@@ -145,7 +145,7 @@ class _SqliteGateway:
             "PRAGMA foreign_keys=ON",
             "PRAGMA busy_timeout=5000",
         ):
-            await self._run(partial(self._require_connection().execute, statement))
+            await self._run(partial(self._require_statement, statement))
         # `migrate` reads PRAGMA table_info, so the fence goes after it: the
         # authoriser refuses PRAGMA, and these are our own statements, run before
         # any plugin holds this connection.
@@ -182,6 +182,34 @@ class _SqliteGateway:
         if self._connection is None:
             raise StorageError("Storage.initialize() must be called first")
         return self._connection
+
+    def _require_statement(self, sql: str) -> None:
+        """Run a statement whose result is not wanted, and leave nothing behind.
+
+        ``Connection.execute`` returns a cursor, and for ``PRAGMA journal_mode=WAL``
+        that cursor holds an *open read of the database header*: the statement stays
+        in progress until the cursor is closed. The obvious version of this --
+        ``partial(connection.execute, sql)`` -- leaves the cursor to the collector,
+        because the object is the result of the ``Future`` ``asyncio.to_thread``
+        built and is freed only when that Future is finalized, on whichever thread
+        gets there first. Until then, the statement is still in progress, and the
+        next statement that opens a transaction cannot commit:
+
+            sqlite3.OperationalError: cannot commit transaction -
+            SQL statements in progress
+
+        which made ``initialize()`` raise and kept the bot from starting, roughly
+        once in five hundred starts under load. It survived a green suite because
+        nothing forced the collector to run at the wrong moment, and because the
+        obvious test does not reproduce it either: at the default isolation level
+        DDL opens no transaction, so ``commit()`` is a no-op that never runs the
+        check. An INSERT is what surfaces it.
+
+        Closing here means the statement is finished before the lock is released,
+        so the outcome does not depend on when, or on which thread, a collection
+        pass happens.
+        """
+        self._require_connection().execute(sql).close()
 
     async def _run(self, operation: Callable[[], Any]) -> Any:
         async with self._lock:

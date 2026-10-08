@@ -199,6 +199,143 @@ async def test_the_watchdog_stops_being_fed_when_telegram_is_gone_for_good(
     )
 
 
+async def test_a_dead_connection_monitor_stops_the_watchdog(
+    app_settings: object, notify_socket: tuple[str, socket.socket], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A monitor that has died cannot vouch for the connection.
+
+    ``monitor_connection`` is the only thing that ever writes
+    ``health.telegram_connected``. Nothing observed that task: if it raised, or was
+    cancelled by anything but shutdown, the flag kept its last value and the
+    heartbeat kept feeding the watchdog on the strength of a reading nobody was
+    taking any more. The unit stayed green and ``/ub status`` still said
+    "подключён" while the Telegram connection state was simply unknown -- the same
+    shape as the two-day outage, arrived at from the other side.
+
+    Unknown must be treated as unusable: the state is marked unknown, the existing
+    grace runs, and systemd restarts a process that cannot see its own connection.
+    """
+    from userbot import app as app_module
+
+    path, server = notify_socket
+    monkeypatch.setenv("NOTIFY_SOCKET", path)
+    monkeypatch.setenv("WATCHDOG_PID", str(os.getpid()))
+    monkeypatch.setattr(app_module, "HEARTBEAT_INTERVAL", 0.01)
+    monkeypatch.setattr(app_module, "DISCONNECT_GRACE", 0.03)
+    monkeypatch.setattr(app_module, "CONNECTION_MONITOR_RETRY", 0.01)
+    app, _gateway = make_app(app_settings)  # type: ignore[arg-type]
+
+    async def dying_monitor(interval: float = 5.0) -> None:
+        raise RuntimeError("the poll loop died")
+
+    # Healthy first, so the pings that stop are attributable to the monitor dying
+    # rather than to the heartbeat never having started.
+    app.health.set_telegram_state(connected=True, authorized=True)
+    app.gateway.monitor_connection = dying_monitor
+    task = asyncio.create_task(app._connection_monitor_supervisor())
+    heartbeat = asyncio.create_task(app._heartbeat_loop())
+    sent: list[bytes] = []
+    try:
+        await asyncio.sleep(0.05)
+        sent += drain(server)
+        assert any(b"WATCHDOG=1" in message for message in sent), "no ping while connected"
+        # Long past the grace, so a ping here would be one the dead monitor is
+        # still paying for.
+        await asyncio.sleep(0.2)
+        after = drain(server)
+        sent += after
+    finally:
+        for running in (heartbeat, task):
+            running.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await running
+
+    assert not any(b"WATCHDOG=1" in message for message in after), (
+        "the watchdog was still fed by a connection monitor that had died"
+    )
+    assert any(b"STATUS=" in message for message in sent), (
+        "systemctl status must say the monitor died, or the restart is unexplained"
+    )
+
+
+async def test_the_connection_monitor_is_restarted_when_it_dies(
+    app_settings: object, notify_socket: tuple[str, socket.socket], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restarting is strictly better than stopping: the bot may well be fine.
+
+    Telethon reconnecting under a poll loop is a normal thing to survive. So the
+    supervisor brings the monitor back, and only the state it cannot vouch for
+    until it reports again is withheld. The opposite choice -- treat a dead
+    monitor as a restart and nothing else -- would restart a healthy bot once per
+    unrelated hiccup in the poll loop.
+    """
+    from userbot import app as app_module
+
+    path, server = notify_socket
+    monkeypatch.setenv("NOTIFY_SOCKET", path)
+    monkeypatch.setenv("WATCHDOG_PID", str(os.getpid()))
+    monkeypatch.setattr(app_module, "HEARTBEAT_INTERVAL", 0.01)
+    monkeypatch.setattr(app_module, "DISCONNECT_GRACE", 10.0)
+    monkeypatch.setattr(app_module, "CONNECTION_MONITOR_RETRY", 0.01)
+    app, gateway = make_app(app_settings)  # type: ignore[arg-type]
+
+    starts: list[int] = []
+
+    async def flaky_monitor(interval: float = 5.0) -> None:
+        starts.append(1)
+        if len(starts) == 1:
+            raise RuntimeError("died once")
+        # The real loop reports the state on its first iteration, because it has
+        # no previous reading to compare against. A double that skipped this would
+        # agree with a supervisor that never recovers the connection.
+        gateway.emit(True)
+        await asyncio.sleep(3600)
+
+    gateway.monitor_connection = flaky_monitor  # type: ignore[method-assign]
+    # start() is what wires this hook up; registering it by hand keeps the test on
+    # the real path (a loop reporting connected has to reach health) without
+    # booting the whole app, whose gateway stub is not what is under test here.
+    gateway.on_connection_state(app._on_connection_state)
+    app.health.set_telegram_state(connected=True, authorized=True)
+    task = asyncio.create_task(app._connection_monitor_supervisor())
+    try:
+        await asyncio.sleep(0.1)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    assert len(starts) >= 2, "the monitor was never brought back"
+    assert app.health.telegram_connected is True, (
+        "a healthy connection must be reported again once the monitor is back"
+    )
+
+
+async def test_start_supervises_the_connection_monitor(app_settings: object) -> None:
+    """The wiring, not just the supervisor.
+
+    A supervisor that nothing runs would leave the real task unwatched exactly as
+    before, and the two tests above would still pass.
+    """
+    app, gateway = make_app(app_settings)  # type: ignore[arg-type]
+    supervised: list[bool] = []
+    original = app._connection_monitor_supervisor
+
+    async def spy() -> None:
+        supervised.append(True)
+        await original()
+
+    app._connection_monitor_supervisor = spy
+    await app.start()
+    try:
+        # The task is created, not run, by start(); give it a turn so the assertion
+        # is about the wiring rather than about scheduling.
+        await asyncio.sleep(0)
+        assert supervised == [True]
+    finally:
+        await app.shutdown()
+
+
 async def test_a_brief_blip_keeps_the_watchdog_fed(
     app_settings: object, notify_socket: tuple[str, socket.socket], monkeypatch: pytest.MonkeyPatch
 ) -> None:

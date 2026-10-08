@@ -38,6 +38,12 @@ HEARTBEAT_INTERVAL = 10.0
 #: gets a chance.
 DISCONNECT_GRACE = 180.0
 
+#: How long to wait before bringing a connection monitor back after it died.
+#: Not zero: a poll loop that raised because the socket was being torn down would
+#: otherwise be respawned in a tight loop, burning the CPU it is supposed to be
+#: reporting the absence of.
+CONNECTION_MONITOR_RETRY = 1.0
+
 #: Longest a plugin command may run before it is reported as timed out.
 DEFAULT_COMMAND_TIMEOUT = 120.0
 
@@ -111,7 +117,7 @@ class UserbotApp:
                 self.logger.info("plugin watcher disabled by configuration")
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
             self._connection_task = asyncio.create_task(
-                self.gateway.monitor_connection(), name="connection-monitor"
+                self._connection_monitor_supervisor(), name="connection-monitor"
             )
             self._started = True
             # Reset the start rate limiter first, then report readiness: a
@@ -180,6 +186,49 @@ class UserbotApp:
         if task is None:
             return
         task.cancel()
+
+    async def _connection_monitor_supervisor(self) -> None:
+        """Keep the connection monitor alive, and never vouch on its behalf.
+
+        ``health.telegram_connected`` is written from one place only: the poll
+        loop in :meth:`TelegramGateway.monitor_connection`. Nothing watched *that*
+        task, so if it raised or was cancelled by anything other than shutdown the
+        flag kept whatever value it had last been given and every reader went on
+        trusting it -- ``/ub status`` said "подключён" and the heartbeat kept
+        feeding the watchdog, on a reading nobody was taking any more. That is the
+        two-day outage seen from this side: the process alive and green while the
+        connection state was simply unknown.
+
+        Two things follow, and both are needed:
+
+        * the state is marked unknown the moment the monitor stops, so the
+          heartbeat's existing grace runs and systemd restarts a process that
+          cannot see its own connection;
+        * the monitor is brought back, because the connection may well be fine
+          and a restart would be a worse outcome than the problem. The first
+          reading of a fresh loop clears the mark, since a restarted loop has no
+          previous value to compare against and always reports.
+
+        Restarts are spaced by :data:`CONNECTION_MONITOR_RETRY` so a loop that
+        dies immediately cannot spin here.
+        """
+        while True:
+            try:
+                await self.gateway.monitor_connection()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("The connection monitor died; restarting it")
+            else:
+                # Returned rather than raised: an orderly loop that ended is still
+                # no longer reporting, so it is treated the same way.
+                self.logger.error("The connection monitor stopped; restarting it")
+            # Until the fresh loop reports, the state is unknown. Setting it
+            # unknown rather than connected is what stops the heartbeat from
+            # feeding the watchdog on a reading nobody is taking.
+            self.health.set_telegram_state(connected=False, authorized=False)
+            self.health.mark_error("The connection monitor is not reporting")
+            await asyncio.sleep(CONNECTION_MONITOR_RETRY)
 
     def _on_connection_state(self, *, connected: bool) -> None:
         """Keep the reported Telegram state honest across network drops."""

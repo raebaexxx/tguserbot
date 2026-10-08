@@ -34,6 +34,37 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
 ### Fixed
 
+- **A statement left in progress could keep the bot from starting.**
+  `Storage.initialize()` ran each setup PRAGMA as
+  `partial(self._require_connection().execute, statement)`. `Connection.execute`
+  returns a cursor, and for `PRAGMA journal_mode=WAL` that cursor holds an *open
+  read of the database header* — the statement stays in progress until it is
+  closed. The cursor is not freed when the `await` returns: it is the result of
+  the `Future` that `asyncio.to_thread` built, so the collector decides when (and
+  on which thread) it goes away. Until then the statement is still open, and the
+  first `INSERT` in `migrate()` opens a transaction that cannot be committed:
+
+      sqlite3.OperationalError: cannot commit transaction -
+      SQL statements in progress
+
+  which propagates out of `initialize()`, so the process never starts. Measured at
+  roughly one start in five hundred, in the test suite and by driving `initialize()`
+  in a loop — an intermittent startup failure, not a deterministic one. It survived
+  1079 green tests because nothing forced a collection pass at the wrong moment,
+  and because the obvious test cannot see it: at the default isolation level `CREATE
+  TABLE` opens no transaction, so `commit()` is a no-op that never runs the check. It
+  takes an `INSERT` to surface, which is why the reproduction only had to add one.
+  Each setup statement now closes its cursor inside the locked operation, so no
+  statement outlives the call that started it and the outcome no longer depends on
+  the collector. `tests/test_storage_cursors.py` pins the failure by construction —
+  a connection proxy holds every cursor alive, which turns a one-in-five-hundred race
+  into a certain one — and separately checks that this proxy really does pin, because
+  the first version of it was a `sqlite3.Connection` subclass whose `cursor()`
+  override is never called (`execute` is implemented in C) and therefore pinned
+  nothing while letting the bug through. Both the blocking behaviour and the DDL
+  no-op that hid it are asserted against real SQLite rather than assumed; the
+  statement that blocks is `journal_mode`, and a pragma that merely returns a row
+  does not, which was checked rather than guessed.
 - **Telethon's own log lines went nowhere.** `setup_logging` gave the `userbot`
   logger its own handlers and set `propagate=False`, and nothing configures
   `root`, so every record Telethon wrote was formatted by nobody and dropped by
