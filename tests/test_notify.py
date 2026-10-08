@@ -13,6 +13,8 @@ import contextlib
 import os
 import socket
 import tempfile
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -256,6 +258,113 @@ async def test_a_dead_connection_monitor_stops_the_watchdog(
     assert any(b"STATUS=" in message for message in sent), (
         "systemctl status must say the monitor died, or the restart is unexplained"
     )
+
+
+@contextlib.contextmanager
+def _captured_bot_logs(caplog: pytest.LogCaptureFixture) -> Iterator[list[str]]:
+    """Collect the bot's own log lines while the block runs.
+
+    ``setup_logging`` sets ``propagate=False`` on ``userbot``, so records never reach
+    the root logger that ``caplog`` listens on. The capture handler has to be on the
+    bot's logger *before* the code under test writes, which is why this wraps the
+    run rather than reading afterwards.
+    """
+    import logging
+
+    bot = logging.getLogger("userbot")
+    handler = caplog.handler
+    bot.addHandler(handler)
+    previous = bot.level
+    bot.setLevel(logging.INFO)
+    lines: list[str] = []
+    try:
+        yield lines
+    finally:
+        bot.removeHandler(handler)
+        bot.setLevel(previous)
+        lines.extend(
+            record.getMessage() for record in handler.records if "updates:" in record.getMessage()
+        )
+
+
+async def test_the_journal_records_that_updates_are_still_arriving(
+    app_settings: object, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The absence that cost two days: a bot that hears nothing and says nothing.
+
+    The outage wrote nothing at all for 48 hours -- no exception, no line, no
+    restart -- and the last processed update had to be found afterwards with a
+    sqlite3 query against the session file. Now the process says so on a timer, with
+    the ``pts`` beside it.
+
+    Reported, never acted on: silence is normal for an idle bot, so this must not
+    warn, must not restart anything, and must say plainly that it is only reporting.
+    """
+    from userbot import app as app_module
+
+    monkeypatch.setattr(app_module, "UPDATE_LIVENESS_INTERVAL", 0.01)
+    app, gateway = make_app(app_settings)  # type: ignore[arg-type]
+    gateway.update_state = (5666718, time.time() - 3600)
+
+    with _captured_bot_logs(caplog) as lines:
+        task = asyncio.create_task(app._report_update_liveness())
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+    assert lines, "nothing was written about update liveness"
+    line = lines[-1]
+    assert "5666718" in line, line
+    assert "never" in line, "with no update ever seen, the line must say so"
+    assert app.health.session_pts == 5666718
+
+
+async def test_the_liveness_line_says_how_long_the_last_update_was(
+    app_settings: object, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After an update arrives, the age has to be reported as an age.
+
+    The two together are the diagnostic: a *rising* age with a *stalled* pts means
+    Telegram is not sending, as against a bot nobody has written to.
+    """
+    from userbot import app as app_module
+
+    monkeypatch.setattr(app_module, "UPDATE_LIVENESS_INTERVAL", 0.01)
+    app, gateway = make_app(app_settings)  # type: ignore[arg-type]
+    gateway.update_state = (5669487, time.time() - 5)
+    app.health.note_update()
+
+    with _captured_bot_logs(caplog) as lines:
+        task = asyncio.create_task(app._report_update_liveness())
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+    assert lines
+    assert "1 seen" in lines[-1], lines[-1]
+    assert "ago" in lines[-1] and "never" not in lines[-1], lines[-1]
+
+
+async def test_the_liveness_loop_is_started_and_stopped_with_the_app(
+    app_settings: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wiring, not just the loop body.
+
+    A correct loop nobody runs would leave the journal as silent as before.
+    """
+    from userbot import app as app_module
+
+    monkeypatch.setattr(app_module, "UPDATE_LIVENESS_INTERVAL", 3600.0)
+    app, _gateway = make_app(app_settings)  # type: ignore[arg-type]
+    await app.start()
+    task = app._liveness_task
+    assert task is not None and not task.done()
+    await app.shutdown()
+    assert task.cancelled() or task.done(), "the liveness task outlived the app"
 
 
 async def test_the_connection_monitor_is_restarted_when_it_dies(

@@ -38,6 +38,12 @@ HEARTBEAT_INTERVAL = 10.0
 #: gets a chance.
 DISCONNECT_GRACE = 180.0
 
+#: How often to write down whether updates are still arriving, and what ``pts`` the
+#: session last recorded. Long, because it is a journal line rather than a metric:
+#: short enough that an overnight outage leaves a trail, long enough not to bury
+#: the errors it sits between.
+UPDATE_LIVENESS_INTERVAL = 900.0
+
 #: How long to wait before bringing a connection monitor back after it died.
 #: Not zero: a poll loop that raised because the socket was being torn down would
 #: otherwise be respawned in a tight loop, burning the CPU it is supposed to be
@@ -85,6 +91,7 @@ class UserbotApp:
         self._shutdown_lock = asyncio.Lock()
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._connection_task: asyncio.Task[None] | None = None
+        self._liveness_task: asyncio.Task[None] | None = None
         self.notifier = SystemdNotifier()
         self._started = False
 
@@ -111,6 +118,10 @@ class UserbotApp:
             # handlers are attached.
             with contextlib.suppress(Exception):
                 await self.gateway.catch_up()
+            # Registered before the plugins, so a plugin handler that blocks cannot
+            # make the last-update stamp look recent, and before the watcher, so a
+            # reload cannot leave it unregistered.
+            self.gateway.watch_updates(self.health)
             if self.settings.watch_enabled:
                 await self.watcher.start()
             else:
@@ -118,6 +129,9 @@ class UserbotApp:
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
             self._connection_task = asyncio.create_task(
                 self._connection_monitor_supervisor(), name="connection-monitor"
+            )
+            self._liveness_task = asyncio.create_task(
+                self._report_update_liveness(), name="update-liveness"
             )
             self._started = True
             # Reset the start rate limiter first, then report readiness: a
@@ -148,6 +162,7 @@ class UserbotApp:
             self.notifier.stopping("unloading plugins")
             self._stop_heartbeat()
             self._stop_connection_monitor()
+            self._stop_liveness()
             with contextlib.suppress(Exception):
                 await self.manager.shutdown()
             self.dispatcher.detach_client()
@@ -183,6 +198,12 @@ class UserbotApp:
 
     def _stop_connection_monitor(self) -> None:
         task, self._connection_task = self._connection_task, None
+        if task is None:
+            return
+        task.cancel()
+
+    def _stop_liveness(self) -> None:
+        task, self._liveness_task = self._liveness_task, None
         if task is None:
             return
         task.cancel()
@@ -229,6 +250,34 @@ class UserbotApp:
             self.health.set_telegram_state(connected=False, authorized=False)
             self.health.mark_error("The connection monitor is not reporting")
             await asyncio.sleep(CONNECTION_MONITOR_RETRY)
+
+    async def _report_update_liveness(self) -> None:
+        """Log how long it has been since Telegram last sent us anything.
+
+        The two-day outage this exists for wrote *nothing* to the journal: the
+        process was alive, the socket was two-way, and the handlers simply stopped
+        being called. So the evidence was not in any log, which is why it took a
+        manual `update_state` query to find. Now the evidence is written down
+        periodically, with the pts beside it -- the same number the runbook's
+        sqlite3 query prints, read through Telethon's own session accessor.
+
+        Reported and never acted upon. Silence is normal for an idle bot, so
+        warning about it would train the operator to ignore the line that matters.
+        """
+        while True:
+            await asyncio.sleep(UPDATE_LIVENESS_INTERVAL)
+            pts, date = self.gateway.read_update_state()
+            self.health.note_session_state(pts, date)
+            idle = self.health.updates_idle_seconds()
+            self.logger.info(
+                "updates: %d seen, last %s, session pts=%s last state %s",
+                self.health.updates_seen,
+                "never" if idle is None else f"{idle:.0f}s ago",
+                "?" if pts is None else pts,
+                "unknown"
+                if date is None
+                else time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(date)),
+            )
 
     def _on_connection_state(self, *, connected: bool) -> None:
         """Keep the reported Telegram state honest across network drops."""
