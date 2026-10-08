@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from telethon import events
 
 from userbot.commands import CommandDispatcher
 from userbot.config import Settings
@@ -376,6 +377,17 @@ class StubGateway:
         self.raise_on_connect: BaseException | None = None
         self.hooks: list[Any] = []
         self.catch_up_calls = 0
+        #: Health services the update watcher has been pointed at.
+        self.watched: list[Any] = []
+        # Bound once: `self._note_update` builds a new object on every access, and
+        # FakeClient removes handlers by identity, so a later lookup would not match
+        # what was registered. Telethon compares with ``==``; being stricter here is
+        # the point of the fake.
+        self._update_note = self._note_update
+        self._update_event: Any = None
+        #: What ``read_update_state`` reports, so a test can drive the liveness
+        #: reporter without a session file.
+        self.update_state: tuple[int | None, float | None] = (None, None)
 
     async def catch_up(self) -> None:
         self.catch_up_calls += 1
@@ -387,11 +399,39 @@ class StubGateway:
         return self._me
 
     async def disconnect(self) -> None:
+        # The real gateway unregisters its update watcher here, and so must this:
+        # a stub that kept the handler would let a leak in the real code pass.
+        if self.client is not None and self.watched:
+            self.client.remove_event_handler(self._update_note, self._update_event)
+            self.watched.clear()
         self.disconnected = True
         self.connected = False
 
     def on_connection_state(self, hook: Any) -> None:
         self.hooks.append(hook)
+
+    def watch_updates(self, health: Any) -> None:
+        """Register the real handler shape, so a test cannot pass on a stub.
+
+        A stub that only remembered the call would let a test go green while the
+        gateway wired nothing to the client -- the kind of double that agrees with
+        the code it stands in for. So the handler is registered on the client and
+        kept, and a test can actually feed an update through it.
+        """
+        if self.client is None:
+            return
+        # The builder is kept for the same reason the gateway keeps its own:
+        # removal matches on identity, so a second events.Raw() would not match.
+        self._update_event = events.Raw()
+        self.client.add_event_handler(self._update_note, self._update_event)
+        self.watched.append(health)
+
+    async def _note_update(self, _event: Any) -> None:
+        for health in self.watched:
+            health.note_update()
+
+    def read_update_state(self) -> tuple[int | None, float | None]:
+        return self.update_state
 
     async def monitor_connection(self, interval: float = 5.0) -> None:
         await asyncio.sleep(3600)

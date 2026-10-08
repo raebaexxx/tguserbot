@@ -26,6 +26,7 @@ Run with: pytest tests/test_shipped_small_plugins.py -q --no-cov
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -205,6 +206,33 @@ async def test_the_ping_handler_answers_the_owner_only(echo_module: Any) -> None
     await plugin.ping(friend)
     assert friend.responses == ["pong"]
     assert asked == [STRANGER, OWNER]
+
+
+async def test_status_reports_update_liveness(status_module: Any) -> None:
+    """The two facts that separate "idle" from "not being fed".
+
+    A bot can look connected and answer nothing, and the difference shows up only
+    here: an idle bot has a *growing* last-update age with a pts that moves when it
+    does hear something, while a starved one has a stale age against a pts that
+    stopped advancing. The outage this was added for produced neither number.
+    """
+    health = HealthService()
+    health.set_telegram_state(connected=True, authorized=True)
+    health.note_update()
+    health.note_session_state(5666718, time.time() - 90)
+    harness = await status_harness(status_module, health)
+    report = (await harness.send("/ub status"))[0]
+    assert "Апдейты: последний" in report
+    assert "Session pts: 5666718" in report
+    assert "состояние" in report
+
+
+async def test_status_says_when_no_update_has_arrived(status_module: Any) -> None:
+    """The cold-start case reads as its own fact, not as an empty field."""
+    harness = await status_harness(status_module, HealthService())
+    report = (await harness.send("/ub status"))[0]
+    assert "не получено ни одного" in report
+    assert "Session pts: неизвестен" in report
 
 
 async def test_the_ping_handler_registers_a_pattern_that_matches(echo_module: Any) -> None:

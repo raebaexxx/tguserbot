@@ -32,6 +32,33 @@ class HealthService:
     last_error_at: float | None = None
     plugin_errors: dict[str, PluginError] = field(default_factory=dict)
     heartbeat_path: Path | None = None
+    #: Wall clock of the last update Telethon dispatched, and how many have been
+    #: seen. Reported rather than acted on: an idle bot legitimately hears nothing
+    #: for hours, so this is the evidence for "the handlers are not being fed", not
+    #: a fault in itself. See :meth:`TelegramGateway.watch_updates`.
+    last_update_at: float | None = None
+    updates_seen: int = 0
+    #: ``pts`` of the last processed update for DC 0, as Telethon's session records
+    #: it. The runbook's own diagnostic reads the same row; keeping it here means
+    #: ``/ub status`` can show the number the operator would otherwise have to go
+    #: and query with sqlite3.
+    session_pts: int | None = None
+    session_update_date: float | None = None
+
+    def note_update(self) -> None:
+        """Called for every update Telethon dispatches, however old."""
+        self.last_update_at = time.time()
+        self.updates_seen += 1
+
+    def note_session_state(self, pts: int | None, date: float | None) -> None:
+        self.session_pts = pts
+        self.session_update_date = date
+
+    def updates_idle_seconds(self, now: float | None = None) -> float | None:
+        """Seconds since the last update, or ``None`` if none has been seen."""
+        if self.last_update_at is None:
+            return None
+        return round((now if now is not None else time.time()) - self.last_update_at, 1)
 
     def mark_error(self, error: str | None, *, plugin: str | None = None) -> None:
         """Record or clear an error.
@@ -86,6 +113,17 @@ class HealthService:
             "watcher_running": self.watcher_running,
             "reload_count": self.reload_count,
             "heartbeat_age_seconds": self.heartbeat_age_seconds(),
+            # The two facts that distinguish "idle" from "not being fed". Reported,
+            # never enforced: a restart here would fire on every quiet afternoon.
+            "updates_seen": self.updates_seen,
+            "updates_idle_seconds": self.updates_idle_seconds(now),
+            "last_update_at": self.last_update_at,
+            "session_pts": self.session_pts,
+            "session_update_age_seconds": (
+                None
+                if self.session_update_date is None
+                else round(now - self.session_update_date, 1)
+            ),
             "last_error": self.last_error,
             "last_error_age_seconds": (
                 None if self.last_error_at is None else round(now - self.last_error_at, 1)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime
 import fcntl
 import logging
 import os
@@ -9,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.errors import AuthKeyUnregisteredError, SessionPasswordNeededError
 
 from .config import Settings
@@ -60,6 +61,12 @@ class TelegramGateway:
         self._client: Any = None
         self._lock_file: Any = None
         self._connection_state_hooks: list[Any] = []
+        #: The update-liveness handler and its event builder, while registered. Both are
+        #: kept because removing a handler needs the same pair back: Telethon
+        #: compares builders by identity, so building a second ``events.Raw()`` for
+        #: the removal would not match.
+        self._update_handler: Any = None
+        self._update_event: Any = None
         self.client = self._build_client()
 
     def _build_client(self) -> Any:
@@ -95,6 +102,89 @@ class TelegramGateway:
     @property
     def session_file(self) -> Path:
         return Path(f"{self.settings.session_path}.session")
+
+    # -- update liveness -----------------------------------------------------
+
+    def watch_updates(self, health: Any) -> None:
+        """Record that updates are still arriving.
+
+        A bot that stops receiving updates while the process stays alive produces
+        no log line, no exception and no restart: `systemctl status` is green and
+        the handlers simply never fire again. That is exactly the shape of the
+        outage that went undiagnosed for two days — nothing in the process said
+        "I have not received an update since October 6th".
+
+        So something has to say it. A raw (``events.Raw``) handler sees every
+        update Telethon dispatches, whatever its type, which is the closest thing
+        to "Telegram is still talking to us" that Telethon exposes; and the runbook
+        already treats `update_state` for DC 0 as the ground truth for this, because
+        Telethon writes `datetime.now()` unconditionally for channels and their
+        dates are therefore always fresh and prove nothing. `pts` is read through
+        Telethon's own session API so the number in `/ub status` is the same number
+        the operator's sqlite3 query prints.
+
+        This reports; it does not act. Silence is not a fault by itself — an idle
+        bot legitimately receives nothing for hours — so nothing is restarted on it.
+        What changes is that the next occurrence is visible in one command instead
+        of being reconstructed from a pts jump noticed days later.
+        """
+        # Registered at most once: a second call would leave the first handler
+        # stamping liveness, and there is nothing to gain by watching twice.
+        self._stop_watching_updates()
+
+        async def note_update(_event: Any) -> None:
+            health.note_update()
+
+        # Held so the same object can be removed again: a handler that outlived the
+        # client would keep stamping liveness for a session this process no longer
+        # holds, which is precisely the kind of stale reading this is meant to
+        # eliminate.
+        builder = events.Raw()
+        self._update_handler = note_update
+        self._update_event = builder
+        self.client.add_event_handler(note_update, builder)
+
+    def _stop_watching_updates(self) -> None:
+        handler, self._update_handler = self._update_handler, None
+        builder, self._update_event = self._update_event, None
+        if handler is None:
+            return
+        with contextlib.suppress(Exception):
+            self.client.remove_event_handler(handler, builder)
+
+    def read_update_state(self) -> tuple[int | None, float | None]:
+        """The last processed update for DC 0, as ``(pts, unix date)``.
+
+        Public because the app's liveness loop calls it on a timer, and because an
+        operator reading ``/ub status`` should be looking at the same number their
+        own sqlite3 query returns.
+        """
+        return self._read_update_state()
+
+    def _read_update_state(self) -> tuple[int | None, float | None]:
+        """``(pts, unix date)`` of the last processed update for DC 0, or ``(None, None)``.
+
+        Read through Telethon's own session accessor, on the assumption -- checked by
+        a test against the installed library -- that it reads the same row the
+        runbook's query does. `mode=ro` is the reason this can be polled from a
+        health check: the file is Telethon's and only Telethon writes it.
+        """
+        get_state = getattr(self.client.session, "get_update_state", None)
+        if not callable(get_state):
+            return None, None
+        try:
+            state = get_state(0)
+        except Exception as exc:  # a session file mid-write, or a locked database
+            logger.debug("could not read the update state: %s", exc)
+            return None, None
+        if state is None:
+            return None, None
+        date = getattr(state, "date", None)
+        timestamp = None
+        if isinstance(date, datetime.datetime):
+            timestamp = date.timestamp()
+        pts = getattr(state, "pts", None)
+        return (int(pts) if isinstance(pts, int) else None, timestamp)
 
     def _secure_session_permissions(self) -> None:
         targets = [self.session_file]
@@ -228,6 +318,13 @@ class TelegramGateway:
         logger.info("Replayed updates missed while offline")
 
     async def disconnect(self) -> None:
+        """Take the client down, and let go of everything attached to it.
+
+        The update watcher goes first: a handler that survived the disconnect would
+        keep stamping "updates are arriving" from a client that is closed, which is
+        the stale-reading failure this whole mechanism exists to remove.
+        """
+        self._stop_watching_updates()
         if self.client.is_connected():
             with contextlib.suppress(Exception):
                 await self.client.disconnect()

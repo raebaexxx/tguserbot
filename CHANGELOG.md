@@ -6,6 +6,26 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The connection monitor was unwatched, so a dead one looked like a live link.**
+  `health.telegram_connected` was written from one place, the poll loop in
+  `monitor_connection`, and nothing observed that task. If it raised or was
+  cancelled, the flag kept its last value and `/ub status` and the heartbeat both
+  kept trusting it. The supervisor now marks the state unknown the moment the
+  monitor stops (so the existing disconnect grace runs and systemd can restart a
+  process that cannot see its own connection) and restarts the monitor after
+  `CONNECTION_MONITOR_RETRY`, because a healthy link must not cost a restart.
+- **The update watcher had no evidence trail.** The outage left nothing in the
+  journal. Now a raw `events.Raw` handler stamps every update Telethon dispatches,
+  `/ub status` reports how long ago the last one was and the session `pts`, and
+  the process writes one `updates:` line every 15 minutes with the same numbers.
+  This reports and never restarts: an idle bot legitimately hears nothing for
+  hours, and a restart on silence would fire every quiet afternoon. `pts` is read
+  through Telethon's own session accessor, checked against the runbook's sqlite3
+  query on the same row, and DC 0 is read by id, because channel rows carry
+  `datetime.now()` and would report liveness for a bot receiving nothing.
+
 ### Added
 
 - `ai` plugin: Gemini chat with a persisted conversation, plus on-demand plugin

@@ -7,6 +7,7 @@ replaced with an in-memory double so nothing here touches the network.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -517,10 +518,15 @@ async def test_handlers_are_removed_on_shutdown(app_settings: Settings) -> None:
     app, gateway = make_app(app_settings)
     await app.start()
     try:
-        # One handler for the /ub dispatcher plus the plugin's own.
-        assert len(gateway.client.handlers) == 2
+        # One for the /ub dispatcher, one for the plugin, one for the update-liveness
+        # watcher the gateway installs. Counted explicitly so a new handler has to
+        # be acknowledged here rather than quietly changing the number.
+        assert len(gateway.client.handlers) == 3
     finally:
         await app.shutdown()
+    # Everything the process registered goes away with it. The gateway's own
+    # watcher is removed too: it holds the health service, and a stale registration
+    # would stamp liveness for a client that is no longer ours.
     assert gateway.client.handlers == []
 
 
@@ -950,6 +956,136 @@ def test_gateway_reports_an_unusable_data_directory(tmp_path: Path) -> None:
     )
     with pytest.raises(GatewayError, match="Cannot create the data directory"):
         TelegramGateway(settings)
+
+
+async def test_a_raw_update_is_stamped_onto_health(tmp_path: Path) -> None:
+    """Updates are recorded by actually dispatching one, not by calling a method.
+
+    The point of the mechanism is that a *raw* handler sees whatever Telegram
+    sends, so the test sends a real ``UpdateUserStatus`` through a real
+    ``_dispatch_update``. A test that called ``health.note_update()`` directly would
+    pass even if the handler were never registered -- which is exactly the case
+    where `/ub status` would report an idle bot forever.
+    """
+    from telethon.tl import types
+
+    from userbot.health import HealthService
+
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    health = HealthService()
+    gateway.watch_updates(health)
+    assert health.updates_seen == 0
+
+    update = types.UpdateUserStatus(user_id=1, status=types.UserStatusOnline(expires=int(1 << 31)))
+    await gateway.client._dispatch_update(update)
+    assert health.updates_seen == 1, "the raw handler never saw the update"
+    assert health.updates_idle_seconds() is not None
+
+
+async def test_the_update_handler_is_removed_on_disconnect(tmp_path: Path) -> None:
+    """A handler that outlived the client would keep stamping liveness forever.
+
+    The stale-reading failure this mechanism exists to detect, reproduced by making
+    the process itself produce one.
+    """
+    from userbot.health import HealthService
+
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    health = HealthService()
+    gateway.watch_updates(health)
+    await gateway.disconnect()
+
+    from telethon.tl import types
+
+    update = types.UpdateUserStatus(user_id=1, status=types.UserStatusOnline(expires=int(1 << 31)))
+    with contextlib.suppress(Exception):
+        await gateway.client._dispatch_update(update)
+    assert health.updates_seen == 0, "a closed client is still stamping updates"
+
+
+async def test_reading_the_update_state_returns_none_before_the_first_one(
+    tmp_path: Path,
+) -> None:
+    """An unwritten session has no row, and that has to read as unknown.
+
+    Not zero: ``pts = 0`` would be a claim about Telegram's sequence number, and a
+    status line reading `pts: 0` on a bot that has been up for an hour is a lie.
+    """
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    assert gateway.read_update_state() == (None, None)
+
+
+async def test_the_update_state_matches_the_runbook_query(tmp_path: Path) -> None:
+    """``/ub status`` must show the number the operator would query by hand.
+
+    The runbook diagnoses a stalled bot with
+
+        sqlite3 "file:<session>?mode=ro" "SELECT pts, date FROM update_state WHERE id=0;"
+
+    If the bot reported a different number for the same row, the two would disagree
+    and the operator would be left choosing between them. So the row is written the
+    way Telethon writes it and both readers are checked against it.
+    """
+    import datetime
+    import sqlite3
+
+    from telethon.tl import types
+
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    written = datetime.datetime(2026, 10, 6, 16, 57, tzinfo=datetime.UTC)
+    gateway.client.session.set_update_state(
+        0,
+        types.updates.State(pts=5666718, qts=0, date=written, seq=1, unread_count=0),
+    )
+    gateway.client.session.save()
+
+    pts, date = gateway.read_update_state()
+    assert pts == 5666718
+    assert date == pytest.approx(written.timestamp())
+
+    # And the same row, read the way the runbook reads it.
+    with sqlite3.connect(f"file:{gateway.session_file}?mode=ro", uri=True) as conn:
+        row_pts, row_date = conn.execute(
+            "SELECT pts, date FROM update_state WHERE id = 0"
+        ).fetchone()
+    assert row_pts == pts
+    assert row_date == pytest.approx(date)
+
+
+async def test_a_channel_date_does_not_pass_for_the_account_one(tmp_path: Path) -> None:
+    """DC 0 only, and the reason is worth pinning.
+
+    Telethon writes ``datetime.now()`` for channel rows unconditionally, so their
+    ``date`` is always fresh and proves nothing about updates arriving. Reading all
+    rows and taking the newest would therefore report liveness for a bot that is
+    receiving nothing -- the exact opposite of what this is for. So the read is
+    ``id = 0``, and this test puts a fresher channel row in the same file to prove
+    the account row is still the one being read.
+    """
+    import datetime
+    import sqlite3
+
+    from telethon.tl import types
+
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    account = datetime.datetime(2026, 10, 6, 16, 57, tzinfo=datetime.UTC)
+    channel = datetime.datetime(2026, 10, 8, 12, 0, tzinfo=datetime.UTC)
+    gateway.client.session.set_update_state(
+        0, types.updates.State(pts=100, qts=0, date=account, seq=1, unread_count=0)
+    )
+    gateway.client.session.set_update_state(
+        -1001234567890,
+        types.updates.State(pts=999, qts=0, date=channel, seq=1, unread_count=0),
+    )
+    gateway.client.session.save()
+
+    with sqlite3.connect(f"file:{gateway.session_file}?mode=ro", uri=True) as conn:
+        rows = conn.execute("SELECT id, pts, date FROM update_state ORDER BY id").fetchall()
+    assert len(rows) == 2, "the channel row was not written"
+
+    pts, date = gateway.read_update_state()
+    assert pts == 100, "a channel row was read as the account's"
+    assert date == pytest.approx(account.timestamp())
 
 
 def test_bind_health_reflects_the_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
