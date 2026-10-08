@@ -7,6 +7,19 @@ from pathlib import Path
 
 LOGGER_NAME = "userbot"
 
+#: Loggers that share this module's handlers.
+#:
+#: ``telethon`` is here because it logs under ``telethon.*`` while the ``userbot``
+#: logger carries ``propagate=False`` and ``root`` is never configured, so
+#: everything Telethon wrote below WARNING was formatted by nobody and dropped by
+#: ``lastResort``. Those are precisely the lines that explain a bot that is alive,
+#: connected and no longer updating: "Cannot get difference since Telegram is
+#: having issues", "Got difference for account updates", "Reconnecting to new data
+#: center", the connection lifecycle. A two-day outage in which the journal held
+#: nothing at all was a direct consequence of them going nowhere.
+TELETHON_LOGGER_NAME = "telethon"
+ATTACHED_LOGGERS = (LOGGER_NAME, TELETHON_LOGGER_NAME)
+
 
 class JsonFormatter(logging.Formatter):
     """One JSON object per line, for log shippers and ``journalctl -o cat``."""
@@ -61,12 +74,21 @@ def setup_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(LOGGER_NAME)
     resolved = getattr(logging, str(level).upper(), None)
-    logger.setLevel(resolved if isinstance(resolved, int) else logging.INFO)
+    resolved_level = resolved if isinstance(resolved, int) else logging.INFO
+    logger.setLevel(resolved_level)
     logger.propagate = False
 
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-        handler.close()
+    # The same handlers go on both loggers, so the two are cleared together: the
+    # stream and the file are shared objects, and leaving a closed one attached to
+    # ``telethon`` would keep writing every one of its lines into a file this call
+    # just abandoned.
+    attached = [logging.getLogger(name) for name in ATTACHED_LOGGERS]
+    for target in attached:
+        target.setLevel(resolved_level)
+        target.propagate = False
+        for handler in list(target.handlers):
+            target.removeHandler(handler)
+            handler.close()
 
     if json:
         formatter: logging.Formatter = JsonFormatter()
@@ -76,9 +98,8 @@ def setup_logging(
             datefmt="%Y-%m-%dT%H:%M:%S%z",
         )
 
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    handlers[0].setFormatter(formatter)
 
     try:
         file_handler = logging.handlers.RotatingFileHandler(
@@ -91,7 +112,11 @@ def setup_logging(
         logger.warning("cannot open the log file in %s; continuing with stderr only", log_dir)
     else:
         file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        handlers.append(file_handler)
+
+    for handler in handlers:
+        for target in attached:
+            target.addHandler(handler)
     return logger
 
 

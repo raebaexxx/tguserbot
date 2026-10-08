@@ -34,6 +34,26 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
 ### Fixed
 
+- **Telethon's own log lines went nowhere.** `setup_logging` gave the `userbot`
+  logger its own handlers and set `propagate=False`, and nothing configures
+  `root`, so every record Telethon wrote was formatted by nobody and dropped by
+  `lastResort`. Everything below WARNING was lost: `Cannot get difference since
+  Telegram is having issues`, `Got difference for account updates`, `Reconnecting
+  to new data center`, the connection lifecycle, the auth-key details. That is
+  exactly the observability the two-day outage needed and did not have — a
+  process that was alive, connected and silent for 48 hours wrote nothing at all,
+  because the only thing that would have said why lives in this library. The
+  `telethon` logger now carries the same handlers at the same level as the bot's
+  own, deliberately the *same* setting rather than a second knob that could
+  drift: an operator who raises the level for their own lines gets Telethon's
+  raised, and one who lowers it to DEBUG gets the per-packet detail. Re-running
+  `setup_logging` clears both loggers together, since the handler objects are
+  shared and a stale one attached to `telethon` would keep writing every line
+  into an abandoned file. The level follows `TGUSERBOT_LOG_LEVEL`, which the
+  shipped unit already sets to INFO, and the fix pins that Telethon derives its
+  module loggers from `logging.getLogger("telethon")` by reading it off a real
+  `TelegramClient`, so a dependency bump that moves it fails here instead of
+  silently emptying the journal again.
 - **`/ub tt` answered in the main thread even when asked inside a topic.** The
   video did not bypass the topic wrapper: it went through it, and the file path
   inside `topics.py` failed. `TelegramClient._file_to_media` returns

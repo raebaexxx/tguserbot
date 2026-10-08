@@ -14,6 +14,7 @@ import pytest
 from conftest import FakeClient, FakeEvent
 from userbot.commands import CommandDispatcher
 from userbot.config import Settings
+from userbot.gateway import TelegramGateway
 from userbot.health import MAX_TRACKED_ERRORS, HealthService, PluginError
 from userbot.logging import JsonFormatter, get_logger, setup_logging
 from userbot.manager import PluginManager
@@ -410,6 +411,77 @@ def test_setup_logging_adds_stream_and_file(tmp_path: Path) -> None:
     for handler in logger.handlers:
         handler.flush()
     assert (tmp_path / "logs" / "userbot.log").is_file()
+
+
+def test_telethons_own_lines_reach_the_log_file(tmp_path: Path) -> None:
+    """Telethon's INFO lines are the ones that explain a bot that stopped updating.
+
+    ``setup_logging`` gave the ``userbot`` logger its own handlers and set
+    ``propagate=False``, and nothing configures ``root``. Telethon logs under
+    ``telethon.*``, so every line it wrote below WARNING -- "Cannot get difference
+    since Telegram is having issues", "Got difference for account updates",
+    "Reconnecting to new data center", the whole connection lifecycle -- was
+    formatted by nobody and dropped by ``lastResort``.
+
+    That is the observability a real incident needed and did not have: a bot that
+    was alive, connected and silent for two days wrote nothing at all, because the
+    only thing that would have said why lives in this library.
+    """
+    log_dir = tmp_path / "logs"
+    setup_logging(log_dir, "INFO")
+    telethon = logging.getLogger("telethon")
+    telethon.setLevel(logging.DEBUG)
+    logging.getLogger("telethon.client.updates").info(
+        "Cannot get difference since Telegram is having issues: ServerError"
+    )
+    for handler in telethon.handlers:
+        handler.flush()
+    text = (log_dir / "userbot.log").read_text(encoding="utf-8")
+    assert "Cannot get difference" in text
+    assert "telethon.client.updates" in text
+
+
+def test_telethon_really_logs_under_that_logger(settings: Settings) -> None:
+    """Pins the assumption the whole fix rests on.
+
+    ``TelegramClient`` takes a ``base_logger`` and derives every module logger from
+    it; this reads the logger Telethon actually uses for its update loop off a real
+    client. A version that changed the base would leave our handlers attached to a
+    logger nobody writes to, and every other test here would still pass while the
+    journal stayed empty -- the failure mode this commit exists to end.
+    """
+    gateway = TelegramGateway(settings)
+    name = gateway.client._log["telethon.client.updates"].name
+    assert name.startswith("telethon"), name
+
+
+def test_telethons_own_lines_honour_the_configured_level(tmp_path: Path) -> None:
+    """The same knob, not a second setting that can drift away from the first.
+
+    An operator who raises the level for the bot's own lines gets Telethon's
+    raised too, and one who lowers it to DEBUG gets Telethon's per-packet detail
+    -- which is the whole point of lowering it.
+    """
+    setup_logging(tmp_path / "logs", "WARNING")
+    telethon = logging.getLogger("telethon")
+    assert telethon.level == logging.WARNING
+    assert telethon.propagate is False
+    assert telethon.handlers, "the telethon logger must not be left handlerless"
+
+
+def test_setup_logging_does_not_leave_a_stale_handler_on_telethon(tmp_path: Path) -> None:
+    """Re-running setup must not double every line into two files forever.
+
+    The handlers are shared between the two loggers, so clearing only the
+    ``userbot`` one would leave the old ones attached to ``telethon`` -- writing
+    each Telethon line into a deleted temporary directory for the rest of the
+    process.
+    """
+    setup_logging(tmp_path / "logs", "INFO")
+    first = len(logging.getLogger("telethon").handlers)
+    second = len((setup_logging(tmp_path / "logs", "INFO")).handlers)
+    telethon = logging.getLogger("telethon")
+    assert len(telethon.handlers) == first == second == 2
 
 
 def test_setup_logging_is_idempotent(tmp_path: Path) -> None:
