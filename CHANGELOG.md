@@ -23,6 +23,23 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   development and fail in production, where `ProtectSystem=strict` makes it
   read-only.
 - `PluginConfig.float_value`, for settings that are not whole numbers.
+- Tests for the `echo`, `notes` and `status` plugins, which shipped with none: the
+  coverage report put all three at 0%, and the number was accurate — no test had
+  ever executed a line of them. That is worth more than the percentage, because
+  each is a place where a wrong answer looks like a working one: `echo` returns
+  whatever it was given, `notes` is the only plugin holding user data, and `status`
+  is the command an operator runs *when something is wrong*, so a field it drops is
+  a fact they cannot get. Two things are deliberately not stubbed. Commands go
+  through the real `CommandDispatcher`, so what a plugin sees as `args` is what the
+  dispatcher really parses — a hand-built `CommandContext` had already made every
+  argument test quietly wrong about where the command name ends. And `notes` runs
+  over a real `PluginStorage` through the manager's own order (initialise, migrate,
+  setup), because the questions that matter there are about *which rows exist*, and
+  a double keeping notes in a list would agree with a plugin that never wrote a
+  `WHERE` clause. The owner's check on `/ubping` is pinned separately, since a raw
+  Telethon handler never passes through the dispatcher's owner check at all, and
+  the registered pattern is compiled and matched rather than merely asserted to
+  exist. All three are now at 100%, and the project total went from 86% to 88%.
 - `ModelRouter`: tries models in order and remembers the one that answered.
   A model's allowance is counted per model, so one configured model is not a
   fallback — when it runs out the only thing left to do is fail. That is not
