@@ -26,19 +26,23 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   query on the same row, and DC 0 is read by id, because channel rows carry
   `datetime.now()` and would report liveness for a bot receiving nothing.
 
-- **A deleted plugin went on reporting itself `active`.** `list_plugins()` builds
-  its names from the tree, the loaded runtimes *and* the `plugin_state` table, and
-  fell back to the stored status for anything without a runtime. A `plugin_state`
-  row outlives the files it describes, so deleting a plugin's directory left its row
-  behind saying `active` — `/ub plugins` reported `echo: active` for ever, across
-  restarts, for a plugin that was not installed, and an operator could not tell a
-  loaded plugin from a deleted one. A plugin that is neither loaded nor present in
-  any root now reads `missing`. Only `active` is treated as the lie it is: `failed`
-  and `unloaded` are honest descriptions of something that happened and are left
-  alone, because collapsing them would throw away the reason — a first version of
-  this fix did exactly that and lost `unloaded`, which is how a wiped Git checkout
-  is reported. `disabled` still outranks the stored status, since turning a plugin
-  off is a decision rather than an observation.
+- **A deleted plugin could go on reporting itself `active`.** `list_plugins()`
+  builds its names from the tree, the loaded runtimes *and* the `plugin_state` table,
+  and falls back to the stored status for anything without a runtime — so a row
+  saying `active` for a plugin that is neither loaded nor on disk was reported as
+  `active`. A plugin that is not installed anywhere now reads `missing`. This was
+  **not** what production showed when `notes` and `echo` were removed: `shutdown()`
+  unloads every plugin and records `unloaded`, so both came back honestly labelled,
+  and the normal lifecycle already closes this hole. It is reachable only when a
+  process dies without a clean shutdown *and* its files are later removed, which is
+  why this is a hardening rather than a fix for something observed — the listing
+  still should not report a plugin as active when nothing is running it and nothing
+  on disk would. Only `active` is treated as the lie it is: `failed` and `unloaded`
+  are honest descriptions of something that happened and are left alone, because
+  collapsing them would throw away the reason — a first version of this fix did
+  exactly that and lost `unloaded`, which is how a wiped Git checkout is reported.
+  `disabled` still outranks the stored status, since turning a plugin off is a
+  decision rather than an observation.
 
 ### Removed
 
@@ -51,9 +55,10 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   `lastrowid` for a DELETE, so a plugin asking "did this delete anything?" was told
   yes even when nothing matched) now has a direct test in `tests/test_config.py`,
   asserted after an insert, which is the only condition under which the stale rowid
-  misleads. Removing a plugin also exposed a separate defect, fixed in its own
-  commit: `list_plugins()` takes its names from the database as well as the tree, so
-  a deleted plugin kept reporting itself `active` in `/ub plugins` for ever.
+  misleads. Removing a plugin also surfaced a weakness in `list_plugins()`, which
+  takes its names from the database as well as the tree and could report a plugin as
+  `active` when nothing was running it and nothing on disk would; hardened in its
+  own commit.
 
 ### Added
 
