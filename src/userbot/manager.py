@@ -581,7 +581,11 @@ class PluginManager:
 
     async def list_plugins(self) -> list[dict[str, Any]]:
         states = {str(state["name"]): state for state in await self.storage.plugin_states()}
-        names = set(self.discover_local_names()) | set(self._runtimes) | set(states)
+        local_names = set(self.discover_local_names())
+        names = local_names | set(self._runtimes) | set(states)
+        #: Every root a plugin can still be installed from. A state row for a name
+        #: that is in none of them describes a plugin that has been deleted.
+        present = local_names | self._installed_git_names(states)
         result: list[dict[str, Any]] = []
         for name in sorted(names):
             runtime = self._runtimes.get(name)
@@ -603,9 +607,7 @@ class PluginManager:
                 result.append(
                     {
                         "name": name,
-                        "status": (
-                            "disabled" if name in self._disabled else state.get("status", "unknown")
-                        ),
+                        "status": self._status_without_runtime(name, state, present),
                         "source": state.get("source", "local"),
                         "source_ref": state.get("source_ref"),
                         "source_url": state.get("source_url"),
@@ -615,6 +617,45 @@ class PluginManager:
                     }
                 )
         return result
+
+    def _installed_git_names(self, states: dict[str, Any]) -> set[str]:
+        """Git plugins whose files are still on disk.
+
+        A Git plugin lives in ``<data_dir>/git-plugins/<name>/<ref>``, so its state
+        row can name a plugin that is genuinely installed without appearing in
+        ``discover_local_names()``. Without this, a disabled Git plugin would be
+        judged on its local name alone and reported ``missing``.
+        """
+        names: set[str] = set()
+        for name, state in states.items():
+            if str(state.get("source", "")) != "git":
+                continue
+            ref = state.get("source_ref")
+            if ref and (self.settings.git_plugin_dir / name / str(ref)).is_dir():
+                names.add(name)
+        return names
+
+    def _status_without_runtime(self, name: str, state: dict[str, Any], present: set[str]) -> str:
+        """What to report for a plugin with no runtime.
+
+        A ``plugin_state`` row outlives the files it describes: deleting a plugin's
+        directory leaves the row behind and nothing rewrote it, so ``/ub plugins``
+        showed ``echo: active`` for ever, across restarts, for a plugin that was not
+        installed. An operator could not tell a loaded plugin from a deleted one,
+        which is the whole job of this listing.
+
+        Only ``active`` is the lie it looks like. Every other stored status is
+        already an honest description -- ``unloaded`` when the staged checkout went
+        missing, ``failed`` when a load raised -- and collapsing them into one word
+        would throw away the reason. A disabled plugin reads ``disabled`` whatever
+        the row says, because that is a decision rather than an observation.
+        """
+        if name in self._disabled:
+            return "disabled"
+        stored = str(state.get("status", "unknown"))
+        if stored == "active" and name not in present:
+            return "missing"
+        return stored
 
     def active_count(self) -> int:
         return len(self._runtimes)

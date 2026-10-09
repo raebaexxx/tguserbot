@@ -700,6 +700,77 @@ async def test_a_removed_plugin_stops_answering(real_plugin_dir: Path, tmp_path:
         await storage.close()
 
 
+async def test_a_deleted_plugin_stops_claiming_to_be_active(
+    tmp_path: Path, plugin_root: Path
+) -> None:
+    """Removing a plugin left it in the listing for ever, as ``active``.
+
+    ``list_plugins()`` builds its names from the tree, the loaded runtimes *and* the
+    ``plugin_state`` table, and falls back to the stored status for anything without
+    a runtime. Deleting a plugin's directory therefore left its row behind saying
+    ``active``, and ``/ub plugins`` went on reporting a plugin that does not exist --
+    across restarts, since nothing ever rewrote the row. An operator reading that
+    list cannot tell a loaded plugin from a deleted one, which is the same failure as
+    the one this table already had once (a load clearing somebody else's error).
+
+    Pinned by seeding the row the way a deletion leaves it: nothing on disk, row
+    says ``active``.
+    """
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
+    try:
+        await storage.upsert_plugin_state("ghost", "local", "active", version="0.1.0")
+        listed = {item["name"]: item for item in await manager.list_plugins()}
+        assert "ghost" in listed, "the row should still be visible -- just not as active"
+        assert listed["ghost"]["status"] == "missing", (
+            f"a plugin that is not installed is reported as {listed['ghost']['status']!r}"
+        )
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
+async def test_a_missing_plugin_does_not_hide_why_it_failed(
+    tmp_path: Path, plugin_root: Path
+) -> None:
+    """The other stored statuses stay as they are.
+
+    Only ``active`` is a lie about a plugin that is not there. ``failed`` and
+    ``unloaded`` are honest descriptions of something that happened, and replacing
+    them with ``missing`` would throw away the reason -- a first version of this fix
+    did exactly that and lost ``unloaded``, which is how a wiped Git checkout is
+    reported.
+    """
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
+    try:
+        await storage.upsert_plugin_state("broken", "local", "failed", error="cannot import X")
+        listed = {item["name"]: item for item in await manager.list_plugins()}
+        assert listed["broken"]["status"] == "failed"
+        assert listed["broken"]["error"] == "cannot import X"
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
+async def test_a_disabled_plugin_reads_as_disabled_whatever_the_row_says(
+    tmp_path: Path, plugin_root: Path
+) -> None:
+    """Turning a plugin off is a decision, and outranks the stored status.
+
+    Otherwise a restart re-reads ``active`` from the row and the operator cannot
+    tell which plugins they switched off.
+    """
+    write_plugin(plugin_root, "beta", body=make_command_plugin("beta_cmd"))
+    manager, storage, client, dispatcher = await build_manager(tmp_path, plugin_root)
+    try:
+        await manager.load_local("beta")
+        await manager.disable("beta")
+        listed = {item["name"]: item for item in await manager.list_plugins()}
+        assert listed["beta"]["status"] == "disabled"
+    finally:
+        await manager.shutdown()
+        await storage.close()
+
+
 async def test_status_command_reports_health(real_plugin_dir: Path, tmp_path: Path) -> None:
     manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)
     try:
