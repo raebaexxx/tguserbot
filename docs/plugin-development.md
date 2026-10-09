@@ -127,8 +127,8 @@ rows = await ctx.storage.fetchall("SELECT id, body FROM items ORDER BY id DESC L
 
 `execute` returns the number of affected rows and `execute_insert` returns the
 new rowid. Do not read `lastrowid` for a DELETE: sqlite leaves it pointing at an
-unrelated earlier INSERT, which previously made `notes delete` report success
-for notes it had not touched.
+unrelated earlier INSERT, so a plugin that asked "did this delete anything?" was
+told yes even when no row matched.
 
 `ATTACH`, `PRAGMA`, `VACUUM`, and stacked statements are refused, so a plugin
 cannot attach the core database and drop tables from the outside.

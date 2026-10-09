@@ -169,8 +169,12 @@ def test_shipped_plugins_declare_a_usable_entrypoint(real_plugin_dir: Path) -> N
 
 
 def test_handler_plugin_registers_through_context(real_plugin_dir: Path) -> None:
-    """The shipped ``echo`` plugin exercises the handler registration path."""
-    loaded = load_plugin(real_plugin_dir / "echo", "echo", 1)
+    """The shipped ``status`` plugin exercises a loaded plugin end to end.
+
+    It was ``echo`` until it was removed; ``status`` loads the same way (manifest,
+    entrypoint, lifecycle hooks) and is the smallest plugin still shipped.
+    """
+    loaded = load_plugin(real_plugin_dir / "status", "status", 1)
     try:
         assert hasattr(loaded.instance, "handle")
     finally:

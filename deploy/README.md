@@ -80,13 +80,13 @@ sudo tguserbotctl health
 
 ## What runs on first start
 
-`notes`, `status`, and `echo` are demo plugins and are loaded by default, so
-they are present in production. `tiktok` is also loaded by default and will
-download and upload files when a command is used. If you do not want the demo
-commands in production, disable them in `userbot.env`:
+`status`, `ai` and `sum` are loaded by default, so they are present in
+production. `tiktok` is also loaded by default and will download and upload files
+when a command is used. If you do not want those commands in production,
+disable them in `userbot.env`:
 
 ```bash
-TGUSERBOT_DISABLED_PLUGINS=echo,notes,tiktok
+TGUSERBOT_DISABLED_PLUGINS=tiktok,sum
 ```
 
 A plugin listed there cannot be re-enabled at runtime; remove it from the list

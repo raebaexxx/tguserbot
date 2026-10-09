@@ -219,6 +219,51 @@ async def test_storage_round_trip_and_plugin_state(tmp_path: Path) -> None:
         await storage.close()
 
 
+async def test_execute_reports_rows_affected_not_the_last_rowid(tmp_path: Path) -> None:
+    """The regression that ``notes delete`` used to surface, now tested directly.
+
+    ``execute`` returned ``cursor.lastrowid``. For INSERT that is the new row, but
+    for DELETE and UPDATE SQLite leaves it pointing at a rowid from an unrelated
+    earlier INSERT -- so a plugin that asked "did this delete anything?" was told
+    yes, always, and reported success on a row it never touched. It was caught
+    through the ``notes`` plugin, which is why the fix is in the storage layer; that
+    plugin has since been removed, and this is what keeps the fix covered.
+
+    Every case is asserted *after* an insert, which is the whole point: the stale
+    rowid only misleads once something else has been inserted.
+    """
+    from userbot.storage import Storage
+
+    storage = Storage(tmp_path / "runtime.sqlite3")
+    await storage.initialize()
+    try:
+        await storage.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, chat TEXT, body TEXT)")
+        assert (
+            await storage.execute_insert(
+                "INSERT INTO notes (chat, body) VALUES (?, ?)", ("7", "первая")
+            )
+            == 1
+        )
+        assert (
+            await storage.execute_insert(
+                "INSERT INTO notes (chat, body) VALUES (?, ?)", ("7", "вторая")
+            )
+            == 2
+        )
+
+        # UPDATE touching two rows, then one, then none.
+        assert await storage.execute("UPDATE notes SET body = 'x' WHERE chat = ?", ("7",)) == 2
+        assert await storage.execute("UPDATE notes SET body = 'y' WHERE chat = ?", ("8",)) == 0
+
+        # DELETE of one row, of a row that is not there, and of another chat's row.
+        assert await storage.execute("DELETE FROM notes WHERE id = ?", (1,)) == 1
+        assert await storage.execute("DELETE FROM notes WHERE id = ?", (1,)) == 0
+        assert await storage.execute("DELETE FROM notes WHERE id = ?", (99,)) == 0
+        assert await storage.execute("DELETE FROM notes WHERE chat = ?", ("999",)) == 0
+    finally:
+        await storage.close()
+
+
 async def test_migration_version_tracking(tmp_path: Path) -> None:
     from userbot.storage import Storage
 

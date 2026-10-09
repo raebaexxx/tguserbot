@@ -26,6 +26,21 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   query on the same row, and DC 0 is read by id, because channel rows carry
   `datetime.now()` and would report liveness for a bot receiving nothing.
 
+### Removed
+
+- The `notes` and `echo` plugins. `notes` was per-chat text notes in a sandboxed
+  database; `echo` was described in its own manifest as a test plugin, and its only
+  real use was `/ubping`, a liveness probe — which `/ub status` now covers better,
+  by reporting how long since the last update and the session `pts` rather than
+  answering to a ping. What they were covering did not go with them: the
+  `Storage.execute` regression that `notes delete` surfaced (it returned a stale
+  `lastrowid` for a DELETE, so a plugin asking "did this delete anything?" was told
+  yes even when nothing matched) now has a direct test in `tests/test_config.py`,
+  asserted after an insert, which is the only condition under which the stale rowid
+  misleads. Removing a plugin also exposed a separate defect, fixed in its own
+  commit: `list_plugins()` takes its names from the database as well as the tree, so
+  a deleted plugin kept reporting itself `active` in `/ub plugins` for ever.
+
 ### Added
 
 - `ai` plugin: Gemini chat with a persisted conversation, plus on-demand plugin
@@ -49,17 +64,15 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
   each is a place where a wrong answer looks like a working one: `echo` returns
   whatever it was given, `notes` is the only plugin holding user data, and `status`
   is the command an operator runs *when something is wrong*, so a field it drops is
-  a fact they cannot get. Two things are deliberately not stubbed. Commands go
+  a fact they cannot get. Two things were deliberately not stubbed. Commands went
   through the real `CommandDispatcher`, so what a plugin sees as `args` is what the
   dispatcher really parses — a hand-built `CommandContext` had already made every
-  argument test quietly wrong about where the command name ends. And `notes` runs
+  argument test quietly wrong about where the command name ends. And `notes` ran
   over a real `PluginStorage` through the manager's own order (initialise, migrate,
-  setup), because the questions that matter there are about *which rows exist*, and
-  a double keeping notes in a list would agree with a plugin that never wrote a
-  `WHERE` clause. The owner's check on `/ubping` is pinned separately, since a raw
-  Telethon handler never passes through the dispatcher's owner check at all, and
-  the registered pattern is compiled and matched rather than merely asserted to
-  exist. All three are now at 100%, and the project total went from 86% to 88%.
+  setup), because the questions that mattered there were about *which rows exist*,
+  and a double keeping notes in a list would agree with a plugin that never wrote a
+  `WHERE` clause. `echo` and `notes` have since been removed; see Removed above for
+  what was carried over and where. `status` is now at 100%.
 - `ModelRouter`: tries models in order and remembers the one that answered.
   A model's allowance is counted per model, so one configured model is not a
   fallback — when it runs out the only thing left to do is fail. That is not

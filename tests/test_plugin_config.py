@@ -215,9 +215,15 @@ def test_shipped_tiktok_defaults_are_declared() -> None:
     assert manifest.config["allowed_domains"] == ["tiktok.com", "tiktokv.com"]
 
 
-def test_shipped_notes_defaults_are_declared() -> None:
-    manifest = PluginManifest.from_path(Path("plugins") / "notes")
-    assert manifest.config["page_size"] == 20
+def test_shipped_status_has_no_config_section() -> None:
+    """The smallest shipped plugin declares no settings.
+
+    Worth pinning while it is true: it is the one plugin a new author copies, and a
+    ``[config]`` block it does not read is exactly the "settings that do nothing"
+    defect the manifest review is for.
+    """
+    manifest = PluginManifest.from_path(Path("plugins") / "status")
+    assert manifest.config == {}
 
 
 def test_shipped_tiktok_honours_an_override(

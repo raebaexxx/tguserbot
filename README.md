@@ -15,7 +15,7 @@ Git plugins are staged and activated manually.
 - reliable enable/disable/reload/rollback operations;
 - a local plugin watcher that quiesces instead of interrupting a reload;
 - an owner-only command dispatcher with per-command timeouts and cooldowns;
-- `notes`, `status`, and `echo` demo plugins, plus a `tiktok` downloader;
+- a `status` plugin: uptime, connection, update liveness, plugin errors;
 - an `ai` plugin: Gemini chat, and plugin generation behind a two-step review;
 - a `sum` plugin: summarises the last messages in a chat, voice notes and
   video messages included (media is off by default — it leaves this machine);
@@ -188,7 +188,7 @@ sources are never fetched or activated automatically; remote sources must be
 allow-listed through `TGUSERBOT_GIT_ALLOWED_REPOS` and installed explicitly. If a
 repository contains several plugin folders, pass the plugin folder as the fourth
 argument, for example
-`/ub plugin install https://github.com/raebaexxx/tguserbot.git main plugins/notes`.
+`/ub plugin install https://github.com/raebaexxx/tguserbot.git main plugins/status`.
 
 Fetching a Git plugin is a no-op unless the URL is allow-listed; comparison
 ignores case and an optional `.git` suffix. Each plugin keeps the three most

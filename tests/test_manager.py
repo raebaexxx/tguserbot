@@ -672,114 +672,29 @@ async def test_shipped_plugins_register_their_commands(
     try:
         await manager.load_all_local()
         names = {item.name for item in dispatcher.commands()}
-        assert {"notes", "status", "echo", "tt"} <= names
+        assert {"status", "tt", "ai", "sum"} <= names
     finally:
         await manager.shutdown()
         await storage.close()
 
 
-async def test_echo_command_round_trip(real_plugin_dir: Path, tmp_path: Path) -> None:
+async def test_a_removed_plugin_stops_answering(real_plugin_dir: Path, tmp_path: Path) -> None:
+    """The plugins removed from the tree are not merely absent from the listing.
+
+    ``echo`` and ``notes`` were deleted; what used to answer those commands must now
+    be the dispatcher's own "unknown command", not a stale registration left in the
+    dispatcher by a reload.
+    """
     manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)
     try:
         await manager.load_all_local()
+        names = {item.name for item in dispatcher.commands()}
+        assert "echo" not in names
+        assert "notes" not in names
+
         event = FakeEvent("/ub echo привет")
         await dispatcher.handle_event(event)
-        assert event.responses == ["привет"]
-    finally:
-        await manager.shutdown()
-        await storage.close()
-
-
-async def test_echo_rejects_an_overlong_argument(real_plugin_dir: Path, tmp_path: Path) -> None:
-    manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)
-    try:
-        await manager.load_all_local()
-        event = FakeEvent("/ub echo " + "x" * 5000)
-        await dispatcher.handle_event(event)
-        assert event.responses == ["Использование: /ub echo <текст>"] or all(
-            len(item) <= 4096 for item in event.responses
-        )
-    finally:
-        await manager.shutdown()
-        await storage.close()
-
-
-async def test_notes_round_trip(real_plugin_dir: Path, tmp_path: Path) -> None:
-    manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)
-    try:
-        await manager.load_all_local()
-        added = FakeEvent("/ub notes add первая заметка", chat_id=7)
-        await dispatcher.handle_event(added)
-        assert added.responses and added.responses[0].startswith("Заметка #")
-
-        listed = FakeEvent("/ub notes list", chat_id=7)
-        await dispatcher.handle_event(listed)
-        assert listed.responses and "первая заметка" in listed.responses[0]
-
-        note_id = added.responses[0].split("#")[1].split()[0]
-        deleted = FakeEvent(f"/ub notes delete {note_id}", chat_id=7)
-        await dispatcher.handle_event(deleted)
-        assert deleted.responses == [f"Заметка #{note_id} удалена."]
-
-        again = FakeEvent("/ub notes list", chat_id=7)
-        await dispatcher.handle_event(again)
-        assert again.responses == ["Заметок пока нет."]
-    finally:
-        await manager.shutdown()
-        await storage.close()
-
-
-async def test_notes_delete_reports_a_miss_honestly(real_plugin_dir: Path, tmp_path: Path) -> None:
-    """Regression: ``Storage.execute`` used to return a stale ``lastrowid`` for
-    DELETE, so ``notes delete`` always claimed success."""
-    manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)
-    try:
-        await manager.load_all_local()
-        FakeEvent("/ub notes add первая", chat_id=7)
-        missing = FakeEvent("/ub notes delete 4242", chat_id=7)
-        await dispatcher.handle_event(missing)
-        assert missing.responses == ["Заметка не найдена в этом чате."]
-
-        wrong_chat = FakeEvent("/ub notes delete 1", chat_id=999)
-        await dispatcher.handle_event(wrong_chat)
-        assert wrong_chat.responses == ["Заметка не найдена в этом чате."]
-    finally:
-        await manager.shutdown()
-        await storage.close()
-
-
-async def test_notes_are_scoped_per_chat(real_plugin_dir: Path, tmp_path: Path) -> None:
-    manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)
-    try:
-        await manager.load_all_local()
-        await dispatcher.handle_event(FakeEvent("/ub notes add из седьмого", chat_id=7))
-        other = FakeEvent("/ub notes list", chat_id=8)
-        await dispatcher.handle_event(other)
-        assert other.responses == ["Заметок пока нет."]
-    finally:
-        await manager.shutdown()
-        await storage.close()
-
-
-async def test_notes_rejects_bad_input(real_plugin_dir: Path, tmp_path: Path) -> None:
-    manager, storage, client, dispatcher = await build_manager(tmp_path, real_plugin_dir)
-    try:
-        await manager.load_all_local()
-        empty = FakeEvent("/ub notes add")
-        await dispatcher.handle_event(empty)
-        assert empty.responses == ["Текст заметки не указан."]
-
-        not_a_number = FakeEvent("/ub notes delete abc")
-        await dispatcher.handle_event(not_a_number)
-        assert not_a_number.responses == ["ID заметки должен быть числом."]
-
-        unknown = FakeEvent("/ub notes frobnicate")
-        await dispatcher.handle_event(unknown)
-        assert unknown.responses and "Неизвестная подкоманда" in unknown.responses[0]
-
-        usage = FakeEvent("/ub notes")
-        await dispatcher.handle_event(usage)
-        assert usage.responses and "Использование" in usage.responses[0]
+        assert event.responses == ["Неизвестная команда. Отправьте /ub help"]
     finally:
         await manager.shutdown()
         await storage.close()

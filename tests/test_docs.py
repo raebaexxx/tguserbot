@@ -193,8 +193,11 @@ def test_deploy_readme_does_not_promise_pytest_on_the_server() -> None:
 def test_deploy_readme_states_what_actually_loads_on_first_start() -> None:
     text = read(DEPLOY_README)
     assert "TGUSERBOT_DISABLED_PLUGINS" in text
-    for name in ("notes", "echo", "tiktok"):
+    for name in ("tiktok", "sum", "status"):
         assert name in text, name
+    # The removed plugins must not still be advertised as shipping.
+    for name in ("notes", "echo"):
+        assert name not in text, f"{name} was removed but the deploy README still lists it"
 
 
 def test_deploy_readme_documented_shutdown_budget_is_real() -> None:

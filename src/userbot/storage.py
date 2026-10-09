@@ -284,9 +284,9 @@ class _SqliteGateway:
     async def execute(self, sql: str, parameters: Sequence[Any] = ()) -> int:
         """Run a statement and return the number of affected rows.
 
-        Never returns ``lastrowid``: for DELETE/UPDATE that value is a stale
-        rowid left over from an unrelated INSERT, which previously made
-        ``notes delete`` report success for notes it never touched.
+        Never returns ``lastrowid``: for DELETE/UPDATE that value is a stale rowid
+        left over from an unrelated INSERT, so a plugin asking "did this change
+        anything?" was told yes even when nothing matched.
         """
 
         def operation() -> int:
