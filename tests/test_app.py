@@ -7,7 +7,6 @@ replaced with an in-memory double so nothing here touches the network.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -982,25 +981,73 @@ async def test_a_raw_update_is_stamped_onto_health(tmp_path: Path) -> None:
     assert health.updates_idle_seconds() is not None
 
 
-async def test_the_update_handler_is_removed_on_disconnect(tmp_path: Path) -> None:
-    """A handler that outlived the client would keep stamping liveness forever.
+async def test_the_update_handler_is_removed_on_its_own(tmp_path: Path) -> None:
+    """Our removal, on a client that is still connected.
 
-    The stale-reading failure this mechanism exists to detect, reproduced by making
-    the process itself produce one.
+    An earlier version of this test called ``disconnect()`` and passed -- but for
+    Telethon's doing: ``disconnect`` empties ``client._event_builders`` itself, so
+    the assertion held whether or not the gateway removed anything. The mutation
+    check caught it (removing the gateway's own removal left the test green). The
+    handler is therefore removed here, directly, with the client still live, so the
+    test can only pass if the gateway's code did it.
     """
+    from telethon.tl import types
+
     from userbot.health import HealthService
 
     gateway = TelegramGateway(make_gateway_settings(tmp_path))
     health = HealthService()
     gateway.watch_updates(health)
-    await gateway.disconnect()
+    assert len(gateway.client._event_builders) == 1
 
-    from telethon.tl import types
+    gateway._stop_watching_updates()
+    assert gateway.client._event_builders == [], "the gateway left its handler registered"
 
     update = types.UpdateUserStatus(user_id=1, status=types.UserStatusOnline(expires=int(1 << 31)))
-    with contextlib.suppress(Exception):
-        await gateway.client._dispatch_update(update)
-    assert health.updates_seen == 0, "a closed client is still stamping updates"
+    await gateway.client._dispatch_update(update)
+    assert health.updates_seen == 0, "a removed handler is still stamping updates"
+
+
+async def test_watching_updates_twice_does_not_double_register(tmp_path: Path) -> None:
+    """A second call must replace the first, not add to it.
+
+    Two live handlers would stamp twice per update, so ``updates_seen`` would run at
+    double the rate and read as a busier bot than there is. The count is the
+    assertion, because it is the only externally visible difference.
+    """
+    from telethon.tl import types
+
+    from userbot.health import HealthService
+
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    first, second = HealthService(), HealthService()
+    gateway.watch_updates(first)
+    gateway.watch_updates(second)
+    assert len(gateway.client._event_builders) == 1, "the watcher registered twice"
+
+    update = types.UpdateUserStatus(user_id=1, status=types.UserStatusOnline(expires=int(1 << 31)))
+    await gateway.client._dispatch_update(update)
+    assert first.updates_seen == 0, "the superseded watcher is still stamping"
+    assert second.updates_seen == 1
+
+
+async def test_telethon_clears_its_own_handlers_on_disconnect(tmp_path: Path) -> None:
+    """A fact about the library, pinned so a bump cannot change it unnoticed.
+
+    The gateway removes its own handler on the way out regardless, but
+    ``TelegramClient.disconnect`` also empties ``_event_builders`` on its own -- which
+    is what made the disconnect-based version of this test pass vacuously. If a
+    Telethon release stopped doing it, that is worth knowing: the gateway's own
+    removal would then be the only thing standing between a closed client and a
+    handler that keeps stamping liveness.
+    """
+    from userbot.health import HealthService
+
+    gateway = TelegramGateway(make_gateway_settings(tmp_path))
+    gateway.watch_updates(HealthService())
+    assert len(gateway.client._event_builders) == 1
+    await gateway.disconnect()
+    assert gateway.client._event_builders == []
 
 
 async def test_reading_the_update_state_returns_none_before_the_first_one(

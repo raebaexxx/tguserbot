@@ -127,6 +127,9 @@ class TelegramGateway:
         bot legitimately receives nothing for hours — so nothing is restarted on it.
         What changes is that the next occurrence is visible in one command instead
         of being reconstructed from a pts jump noticed days later.
+
+        Registered at most once: a second call replaces the first rather than adding
+        to it, so one update cannot be counted twice.
         """
         # Registered at most once: a second call would leave the first handler
         # stamping liveness, and there is nothing to gain by watching twice.
@@ -320,9 +323,12 @@ class TelegramGateway:
     async def disconnect(self) -> None:
         """Take the client down, and let go of everything attached to it.
 
-        The update watcher goes first: a handler that survived the disconnect would
-        keep stamping "updates are arriving" from a client that is closed, which is
-        the stale-reading failure this whole mechanism exists to remove.
+        ``TelegramClient.disconnect`` empties ``_event_builders`` by itself, so the
+        update watcher cannot outlive the connection in practice -- measured, and
+        pinned by a test rather than assumed. This call is still made, for the part
+        Telethon does not do: it drops our own reference to the handler, so the
+        gateway does not go on holding one for a client it no longer has, and a
+        later ``watch_updates`` does not try to unregister it from a new client.
         """
         self._stop_watching_updates()
         if self.client.is_connected():
