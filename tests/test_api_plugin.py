@@ -123,12 +123,19 @@ async def test_a_rate_limited_key_falls_back_with_a_notice(
     api_modules: Any, tmp_path: Path
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if "groq" in request.url.host:
+        streaming = False
+        try:
+            streaming = bool(json.loads(request.content).get("stream"))
+        except (ValueError, AttributeError):
+            pass
+        if "groq" in request.url.host and streaming:
             return httpx.Response(
                 429, headers={"retry-after": "120"}, json={"error": {"message": "quota"}}
             )
         if request.url.path.endswith("/chat/completions"):
-            return sse("ответ из nvidia")
+            if streaming:
+                return sse("ответ из nvidia")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
         return httpx.Response(404)
 
     plugin, ctx = await build(api_modules, tmp_path, handler)
@@ -573,6 +580,30 @@ async def test_validation_cooldowns_a_revoked_key(api_modules: Any, tmp_path: Pa
     cmd, event = command("keys")
     await plugin._command(cmd)
     assert "в кулдауне 1" in "\n".join(event.responses)
+    await shutdown(plugin, ctx)
+
+
+async def test_the_sweep_validates_a_key_whose_check_never_finished(
+    api_modules: Any, tmp_path: Path
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "swept-model"}]})
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+        return httpx.Response(404)
+
+    plugin, ctx = await build(api_modules, tmp_path, handler)
+    endpoint_id = await seed(
+        api_modules, plugin, base="https://api.groq.com/openai/v1", key="k1", model="swept-model"
+    )
+    assert not await plugin.catalog.is_checked(endpoint_id)
+    queued = await plugin._validate_unchecked()
+    assert queued == 1
+    await asyncio.sleep(0.2)
+    assert await plugin.catalog.is_checked(endpoint_id)
+    rows = await plugin.catalog.model_rows()
+    assert rows[0]["alive"] == 1
     await shutdown(plugin, ctx)
 
 

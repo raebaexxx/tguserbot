@@ -258,6 +258,18 @@ class Catalog:
         )
         return bool(row and row["last_checked"])
 
+    async def unchecked_endpoint_ids(self) -> list[int]:
+        """Endpoints whose validation never completed.
+
+        A validation that crashed mid-way leaves no marker, so without this
+        sweep those keys would sit unverified forever: nothing re-validates an
+        endpoint that already exists in the catalogue.
+        """
+        rows = await self.storage.fetchall(
+            "SELECT id FROM endpoints WHERE last_checked IS NULL ORDER BY id"
+        )
+        return [int(row["id"]) for row in rows]
+
     async def mark_checked(
         self, endpoint_id: int, *, alive: bool, api_models: Sequence[str] | None
     ) -> None:

@@ -214,3 +214,14 @@ async def test_endpoint_models_scores_working_and_starred_first(
     assert set(names) == {"m-star", "m-plain", "m-listed"}
     # A role no listed model satisfies comes back empty rather than wrong.
     assert await catalog.endpoint_models(endpoint_id, role="stt") == []
+
+
+async def test_unchecked_endpoint_ids_reports_never_validated(
+    api_modules: Any, catalog: Any
+) -> None:
+    first, _ = await catalog.upsert_post(parsed(api_modules, working=("m-a",)), post_id=1)
+    second, _ = await catalog.upsert_post(
+        parsed(api_modules, key="key-2", working=("m-b",)), post_id=2
+    )
+    await catalog.mark_checked(second, alive=True, api_models=None)
+    assert await catalog.unchecked_endpoint_ids() == [first]

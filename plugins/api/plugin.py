@@ -240,14 +240,28 @@ class Plugin(BasePlugin):
         ctx.register_handler(self._on_channel_post, events.NewMessage(chats=[self._entity]))
         self._log.info("api: слушаю канал %s", self._channel)
         if self.catalog is None or await self.catalog.get_meta("cursor") is not None:
+            await self._validate_unchecked()
             return
         limit = ctx.config.int_value("initial_scan", 100)
         try:
             posts, created = await self._scan(self._entity, limit=limit)
         except Exception as exc:
             self._log.warning("api: первичный скан канала не удался: %s", exc)
+            await self._validate_unchecked()
             return
         self._log.info("api: первичный скан: %s постов, %s новых ключей", posts, created)
+        await self._validate_unchecked()
+
+    async def _validate_unchecked(self) -> int:
+        """Queue validation for every key whose check never finished."""
+        if self.catalog is None or self.ctx is None:
+            return 0
+        ids = await self.catalog.unchecked_endpoint_ids()
+        for endpoint_id in ids:
+            self.ctx.spawn(self._validate_endpoint(endpoint_id), name="api:validate")
+        if ids:
+            self._log.info("api: ставлю на проверку %s ключей", len(ids))
+        return len(ids)
 
     async def _ensure_member(self, entity: Any) -> None:
         client = cast(Any, self.ctx.client if self.ctx else None)
@@ -1057,6 +1071,7 @@ class Plugin(BasePlugin):
             f"Разобрано постов: {posts}, новых ключей: {created}. "
             "Проверка новых идёт в фоне — /ub api keys покажет итог."
         )
+        await self._validate_unchecked()
         await delete_message(placeholder)
 
     async def _test(self, command: CommandContext, rest: str) -> None:
