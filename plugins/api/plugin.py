@@ -117,9 +117,10 @@ STREAMING_MARK = "…"
 class _ProgressEditor:
     """Edits a message at most once per interval, and flushes the last text."""
 
-    def __init__(self, event: Any, interval: float) -> None:
+    def __init__(self, event: Any, interval: float, logger: logging.Logger) -> None:
         self._event = event
         self._interval = max(MIN_EDIT_INTERVAL, interval)
+        self._logger = logger
         self._pending: str | None = None
         self._stop = asyncio.Event()
         self._broken = False
@@ -148,7 +149,7 @@ class _ProgressEditor:
         if not await edit_message(self._event, text):
             self._broken = True
             self._stop.set()
-            LOGGER.warning("api: cannot edit the progress message; final answers still send")
+            self._logger.warning("api: cannot edit the progress message; final answers still send")
 
     async def finish(self) -> None:
         self._stop.set()
@@ -179,7 +180,7 @@ class Plugin(BasePlugin):
         self._validate_sem = asyncio.Semaphore(concurrency)
         self._channel = ctx.config.str_value("channel", "zk_ichinokata").strip().lstrip("@")
         ctx.register_command("api", self._command, help_text=USAGE)
-        LOGGER.info(
+        self._log.info(
             "api: канал %s, медиа %s", self._channel, "вкл" if self._media_enabled() else "выкл"
         )
         ctx.spawn(self._bootstrap(), name="api:bootstrap")
@@ -191,6 +192,20 @@ class Plugin(BasePlugin):
 
     def _media_enabled(self) -> bool:
         return bool(self.ctx and self.ctx.config.bool_value("media_enabled", True))
+
+    @property
+    def _log(self) -> logging.Logger:
+        """The namespaced logger the manager configured for this plugin.
+
+        The module-level logger resolves to this module's import name, which
+        has no handler attached in production -- every INFO line was silently
+        dropped until validation failures showed up through the task registry
+        instead. Messages must go through ``ctx.logger``
+        (``userbot.plugin.api``), which is wired to the journal and the file.
+        """
+        if self.ctx is not None:
+            return self.ctx.logger
+        return LOGGER
 
     # -- channel -----------------------------------------------------------
 
@@ -210,12 +225,12 @@ class Plugin(BasePlugin):
                 self._entity = await ctx.client.get_input_entity(self._channel)
                 break
             except Exception as exc:
-                LOGGER.warning("api: канал %s пока не резолвится: %s", self._channel, exc)
+                self._log.warning("api: канал %s пока не резолвится: %s", self._channel, exc)
                 self._entity = None
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 300.0)
         if self._entity is None:
-            LOGGER.error(
+            self._log.error(
                 "api: %s недоступен; команды работают, свежие посты подтянет /ub api refresh",
                 self._channel,
             )
@@ -223,16 +238,16 @@ class Plugin(BasePlugin):
         if ctx.config.bool_value("join_on_setup", True):
             await self._ensure_member(self._entity)
         ctx.register_handler(self._on_channel_post, events.NewMessage(chats=[self._entity]))
-        LOGGER.info("api: слушаю канал %s", self._channel)
+        self._log.info("api: слушаю канал %s", self._channel)
         if self.catalog is None or await self.catalog.get_meta("cursor") is not None:
             return
         limit = ctx.config.int_value("initial_scan", 100)
         try:
             posts, created = await self._scan(self._entity, limit=limit)
         except Exception as exc:
-            LOGGER.warning("api: первичный скан канала не удался: %s", exc)
+            self._log.warning("api: первичный скан канала не удался: %s", exc)
             return
-        LOGGER.info("api: первичный скан: %s постов, %s новых ключей", posts, created)
+        self._log.info("api: первичный скан: %s постов, %s новых ключей", posts, created)
 
     async def _ensure_member(self, entity: Any) -> None:
         client = cast(Any, self.ctx.client if self.ctx else None)
@@ -243,15 +258,15 @@ class Plugin(BasePlugin):
         elif isinstance(entity, InputChannel):
             channel = entity
         else:
-            LOGGER.warning("api: %r не похож на канал; реалтайм не включаю", entity)
+            self._log.warning("api: %r не похож на канал; реалтайм не включаю", entity)
             return
         try:
             await client(JoinChannelRequest(channel))
-            LOGGER.info("api: подписался на канал")
+            self._log.info("api: подписался на канал")
         except UserAlreadyParticipantError:
             pass
         except Exception as exc:
-            LOGGER.warning(
+            self._log.warning(
                 "api: не удалось подписаться (%s); реалтайм недоступен, остаётся /ub api refresh",
                 exc,
             )
@@ -327,7 +342,7 @@ class Plugin(BasePlugin):
                     self.http, endpoint.base_url, endpoint.api_key, request_timeout=25
                 )
             except ApiError as exc:
-                LOGGER.info("api: /models у %s не ответил: %s", endpoint.provider, exc)
+                self._log.info("api: /models у %s не ответил: %s", endpoint.provider, exc)
                 if exc.kind == "auth":
                     await self.catalog.cooldown_endpoint(endpoint_id, AUTH_COOLDOWN_SECONDS)
                     await self.catalog.mark_checked(endpoint_id, alive=False, api_models=None)
@@ -361,7 +376,7 @@ class Plugin(BasePlugin):
                         await self.catalog.cooldown_model(endpoint_id, name, MODEL_DENIED_SECONDS)
                     continue
             await self.catalog.mark_checked(endpoint_id, alive=alive, api_models=models)
-            LOGGER.info(
+            self._log.info(
                 "api: проверка %s: жив=%s, моделей от API: %s",
                 endpoint.provider,
                 alive,
@@ -394,7 +409,7 @@ class Plugin(BasePlugin):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            LOGGER.exception("api: команда упала")
+            self._log.exception("api: команда упала")
             await command.respond(f"Ошибка: {exc}")
 
     async def _subcommand(self, command: CommandContext, head: str, rest: str) -> None:
@@ -472,7 +487,7 @@ class Plugin(BasePlugin):
                 ")"
             )
         except Exception:
-            LOGGER.warning("api: не удалось убрать неотвеченный вопрос из истории")
+            self._log.warning("api: не удалось убрать неотвеченный вопрос из истории")
 
     async def _reset(self, command: CommandContext) -> None:
         if self.ctx is None:
@@ -515,7 +530,7 @@ class Plugin(BasePlugin):
             await self.catalog.cooldown_endpoint(candidate.endpoint_id, SERVER_COOLDOWN_SECONDS)
         # bad_request is not remembered: the shape was wrong for this model,
         # and the next candidate deserves the request.
-        LOGGER.info("api: %s (%s) — %s", candidate.model, candidate.provider, exc)
+        self._log.info("api: %s (%s) — %s", candidate.model, candidate.provider, exc)
 
     async def _try_role(
         self,
@@ -563,7 +578,9 @@ class Plugin(BasePlugin):
         first = candidates[0]
 
         placeholder = await command.event.respond(STREAMING_MARK)
-        editor = _ProgressEditor(placeholder, ctx.config.float_value("min_edit_interval", 3.0))
+        editor = _ProgressEditor(
+            placeholder, ctx.config.float_value("min_edit_interval", 3.0), ctx.logger
+        )
         worker = asyncio.create_task(editor.run())
         content: list[str] = []
         reasoning: list[str] = []
@@ -813,7 +830,7 @@ class Plugin(BasePlugin):
                     else:
                         transcript = None
                 except ApiError as exc:
-                    LOGGER.info("api: STT для видео недоступен: %s", exc)
+                    self._log.info("api: STT для видео недоступен: %s", exc)
             frame_notes: list[tuple[float, str]] = []
             vision_used: str | None = None
             for moment, jpg in frames:
@@ -841,7 +858,7 @@ class Plugin(BasePlugin):
                 try:
                     description, vision_candidate = await self._try_role("vision", ask_vision)
                 except ApiError as exc:
-                    LOGGER.info("api: vision для видео недоступен: %s", exc)
+                    self._log.info("api: vision для видео недоступен: %s", exc)
                     break
                 if description and description.strip():
                     frame_notes.append((moment, description.strip()))
@@ -1032,7 +1049,7 @@ class Plugin(BasePlugin):
             entity = await self._resolve_channel()
             posts, created = await self._scan(entity, limit=limit)
         except Exception as exc:
-            LOGGER.warning("api: refresh не удался: %s", exc)
+            self._log.warning("api: refresh не удался: %s", exc)
             await command.respond(f"Не получилось прочитать канал: {exc}")
             await delete_message(placeholder)
             return
