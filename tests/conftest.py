@@ -172,6 +172,9 @@ class FakeEvent:
     edits: list[str] = field(default_factory=list)
     deleted: bool = False
     entities: Any = None
+    #: The command message itself, as ``event.message`` in Telethon, so a test
+    #: can hang a ``get_reply_message`` carrier on it for reply-based flows.
+    message: Any = None
 
     async def respond(self, text: str | None = None, *, file: str | None = None, **_: Any) -> None:
         if file is not None:

@@ -19,6 +19,8 @@ Git plugins are staged and activated manually.
 - an `ai` plugin: Gemini chat, and plugin generation behind a two-step review;
 - a `sum` plugin: summarises the last messages in a chat, voice notes and
   video messages included (media is off by default — it leaves this machine);
+- an `api` plugin: chat, images and media through the free OpenAI-compatible
+  APIs published in a Telegram channel (`docs/api-plugin.md`);
 - tests, CI gates, and deployment templates.
 
 ## Requirements
@@ -101,6 +103,18 @@ Both `sum` and `ai` list fallback models in `model_fallbacks`. The free tier's
 daily allowance is counted per model, so when the configured one is exhausted the
 plugins move to the next and say which model actually answered — instead of
 spending four retries on a quota that resets at midnight.
+
+## Free APIs from a channel
+
+`/ub api` chats through the free OpenAI-compatible APIs that a public channel
+publishes (`@zk_ichinokata` by default), and covers the media cases too: voice
+notes transcribe, videos summarise by merging a speech transcript with sampled
+frames, photos answer questions, and `/ub api img` generates images. New posts
+are parsed as they arrive and every new key is validated with one `/models`
+call and one one-token chat request; failures earn cooldowns and the next
+candidate answers instead of retrying a key that just refused. Media is on by
+default here — the first media reply says once where the bytes went. See
+`docs/api-plugin.md`.
 
 ## Plugin layout
 

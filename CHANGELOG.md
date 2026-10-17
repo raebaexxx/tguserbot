@@ -6,6 +6,29 @@ semantic versioning for the plugin API surface (`userbot.plugin_api.__all__`).
 
 ## [Unreleased]
 
+### Added
+
+- **An `api` plugin: chat, images and media through the free OpenAI-compatible
+  APIs published in a Telegram channel.** The channel (`@zk_ichinokata` by
+  default) posts offer-shaped messages — base URL, key, and its own probe of
+  which models the key can reach — and the plugin parses them as they arrive,
+  backfills the last hundred on first start, and validates every new key with
+  one `/models` call and one one-token chat request. Deep-probing the media
+  models on every refresh would spend the free quota this plugin exists to
+  spend on questions, so capabilities are read off model names and confirmed
+  lazily at first use. Questions route through an autopilot that prefers a
+  pinned model, then provider priority, then what was actually verified; a
+  `429` earns a cooldown (or a short inline wait when the API named one), a
+  `403` a model cooldown, a revoked key a six-hour endpoint cooldown — and the
+  next candidate answers. Failures are recalled, not re-tried, which is what
+  keeps `/ub api models` honest. Voice notes transcribe through
+  Whisper-compatible endpoints, videos summarise by merging a speech transcript
+  with evenly sampled, hash-deduplicated frames, photos answer questions
+  through vision models, and `/ub api img` generates images. Media is on by
+  default here, unlike `sum`, and the first media reply says once where the
+  bytes went: these are third-party free keys, and the user should be told
+  rather than protected. See `docs/api-plugin.md`.
+
 ### Fixed
 
 - **The connection monitor was unwatched, so a dead one looked like a live link.**

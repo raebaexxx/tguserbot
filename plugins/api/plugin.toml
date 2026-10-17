@@ -1,0 +1,58 @@
+name = "api"
+version = "0.1.0"
+api = "1"
+entrypoint = "plugin:Plugin"
+description = "Chat, images and media through free OpenAI-compatible APIs published in a channel"
+schema_version = 1
+
+# Defaults, overridable in <data_dir>/plugin-config.toml:
+#
+#   [api]
+#   media_enabled = false
+#   provider_priority = ["groq", "nvidia"]
+#   pinned_model = "ministral-14b-latest"
+[config]
+#: The channel whose posts carry the API offers. Without the leading "@".
+channel = "zk_ichinokata"
+
+#: Posts fetched on the first run and by `/ub api refresh` without an argument.
+initial_scan = 100
+
+#: Subscribe to the channel so new posts arrive as events. Telegram delivers
+#: channel updates only to members, so without membership realtime degrades to
+#: `/ub api refresh` and this is written to the journal once.
+join_on_setup = true
+
+#: Media (voice, video, photos) leaves this machine for third-party endpoints,
+#: unlike anything the core does. It is on by default because this plugin is
+#: the media feature, and there is a switch to turn it off.
+media_enabled = true
+
+#: Seconds between streaming progress edits. Telegram counts edits; a question
+#: answered in ten seconds must not produce a hundred of them.
+min_edit_interval = 3.0
+
+#: Conversation turns replayed to the API. Each turn is a token cost.
+max_history_turns = 12
+
+#: Per-request timeout, seconds.
+timeout_seconds = 180
+
+#: Provider preference, decided among equals. Earlier wins; unknown hosts go
+#: last. Providers beyond this list are still used.
+provider_priority = ["groq", "nvidia", "mistral", "minimax", "agnes"]
+
+#: Endpoints validated in parallel after a refresh. Each validation is one
+#: /models call and one one-token chat request -- deliberately cheap, because
+#: every request spends a free key's quota.
+validation_concurrency = 3
+
+#: Media budgets in bytes. The unit runs with PrivateTmp (tmpfs is RAM) and
+#: MemoryMax=1G, so a video is capped rather than allowed to fill memory.
+video_max_bytes = 52428800
+audio_max_bytes = 20971520
+image_max_bytes = 10485760
+
+#: Frames sampled from a video for the vision pass, and their width in pixels.
+video_frames = 6
+frame_width = 512
