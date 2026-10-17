@@ -278,7 +278,7 @@ class Catalog:
 
     async def endpoint_models(self, endpoint_id: int, *, role: str, limit: int = 3) -> list[str]:
         rows = await self.storage.fetchall(
-            "SELECT name, working, denied, listed FROM models WHERE endpoint_id = ?",
+            "SELECT name, working, denied, listed, starred FROM models WHERE endpoint_id = ?",
             (endpoint_id,),
         )
         scored: list[tuple[int, str]] = []

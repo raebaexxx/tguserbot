@@ -192,3 +192,25 @@ async def test_model_and_provider_lookups(api_modules: Any, catalog: Any) -> Non
     assert not await catalog.model_exists("m-unknown")
     assert await catalog.provider_exists("groq")
     assert not await catalog.provider_exists("nothing")
+
+
+async def test_endpoint_models_scores_working_and_starred_first(
+    api_modules: Any, catalog: Any
+) -> None:
+    mention = api_modules.channel.ModelMention
+    post = api_modules.channel.ParsedPost(
+        base_url="https://api.groq.com/openai/v1",
+        api_key="key-1",
+        post_date=None,
+        tier=None,
+        working=(mention("m-plain"), mention("m-star", True)),
+        denied=(mention("m-denied"),),
+        listed=(mention("m-listed"),),
+        listed_truncated=False,
+    )
+    endpoint_id, _created = await catalog.upsert_post(post, post_id=1)
+    names = await catalog.endpoint_models(endpoint_id, role="chat")
+    assert names[0] == "m-star"
+    assert set(names) == {"m-star", "m-plain", "m-listed"}
+    # A role no listed model satisfies comes back empty rather than wrong.
+    assert await catalog.endpoint_models(endpoint_id, role="stt") == []
